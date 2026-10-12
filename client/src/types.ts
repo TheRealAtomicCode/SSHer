@@ -90,6 +90,7 @@ export type View =
   | 'shortcuts'
   | 'links'
   | 'users'
+  | 'processes'
   | 'nginx'
   | 'docker'
   | 'dotnet'
@@ -412,3 +413,18 @@ export interface CommandLogEntry {
   code: number | null;
   durationMs: number;
 }
+
+// ----------------------------------------------------------------processes
+
+export interface ProcessInfo {
+  pid: number;
+  ppid: number;
+  user: string;
+  cpu: number;
+  mem: number;
+  etime: string;
+  stat: string;
+  command: string;
+}
+
+export type Signal = 'TERM' | 'KILL' | 'HUP' | 'INT';

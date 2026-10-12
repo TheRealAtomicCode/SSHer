@@ -11,6 +11,7 @@ import LogsView from './components/LogsView.vue';
 import NginxView from './components/NginxView.vue';
 import PortsView from './components/PortsView.vue';
 import PostgresView from './components/PostgresView.vue';
+import ProcessesView from './components/ProcessesView.vue';
 import QuickLinksView from './components/QuickLinksView.vue';
 import ShortcutDialog from './components/ShortcutDialog.vue';
 import ShortcutsView from './components/ShortcutsView.vue';
@@ -164,6 +165,7 @@ const NAV: { view: View; label: string; icon: string; sub?: boolean }[] = [
   { view: 'shortcuts', label: 'Shortcuts', icon: 'fa-star', sub: true },
   { view: 'links', label: 'Quick Links', icon: 'fa-link' },
   { view: 'users', label: 'Users', icon: 'fa-users' },
+  { view: 'processes', label: 'Processes', icon: 'fa-microchip' },
   { view: 'nginx', label: 'Nginx', icon: 'fa-globe' },
   { view: 'dotnet', label: '.NET apps', icon: 'si-dotnet' },
   { view: 'docker', label: 'Docker', icon: 'fa-docker' },
@@ -343,6 +345,8 @@ const NAV: { view: View; label: string; icon: string; sub?: boolean }[] = [
         <QuickLinksView v-if="view === 'links'" @open-path="openShortcut" />
 
         <UsersView v-if="view === 'users'" :session="session" />
+
+        <ProcessesView v-if="view === 'processes'" />
 
         <NginxView v-if="view === 'nginx'" @open-path="openShortcut" />
 

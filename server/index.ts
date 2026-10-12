@@ -11,6 +11,7 @@ import { registerNginx } from './nginx.js';
 import { execMaybeRootOrThrow, registerOps } from './ops.js';
 import { registerPermissions } from './permissions.js';
 import { registerPostgres } from './postgres.js';
+import { registerProcesses } from './processes.js';
 import { registerTerminal } from './terminal.js';
 import { registerUsers } from './users.js';
 import {
@@ -483,6 +484,7 @@ registerDotnet(app, requireSession as express.RequestHandler, asyncRoute, upload
 registerUsers(app, requireSession as express.RequestHandler, asyncRoute);
 registerPostgres(app, requireSession as express.RequestHandler, asyncRoute);
 registerPermissions(app, requireSession as express.RequestHandler, asyncRoute);
+registerProcesses(app, requireSession as express.RequestHandler, asyncRoute);
 
 app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
   console.error('[api]', err.message);

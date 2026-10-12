@@ -30,7 +30,9 @@ import type {
   PostgresSchemaPrivileges,
   PostgresTablePrivilege,
   PostgresTablePrivileges,
+  ProcessInfo,
   Session,
+  Signal,
   StepResult,
   SudoChange,
   SystemGroup,
@@ -608,4 +610,14 @@ export function terminalUrl(cols: number, rows: number): string {
   if (accessKey) params.set('key', accessKey);
   const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
   return `${scheme}://${location.host}/api/terminal?${params.toString()}`;
+}
+
+// ---------------------------------------------------------------- processes
+
+export function processes(): Promise<{ processes: ProcessInfo[] }> {
+  return request('/processes');
+}
+
+export function signalProcess(pid: number, signal: Signal): Promise<{ output: string }> {
+  return request(`/processes/${pid}/signal`, { method: 'POST', body: json({ signal }) });
 }

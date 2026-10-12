@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue';
+import CommandLogList from './CommandLogList.vue';
 import TerminalPane from './TerminalPane.vue';
 
 const props = defineProps<{ open: boolean }>();
 const emit = defineEmits<{ close: [] }>();
 
 // Created the first time the dock is opened, then left alone — closing the
-// dock only hides it (v-show below), it doesn't kill the shells, the same way
+// dock only hides it (v-show below), it doesn't kill the shell, the same way
 // minimizing a terminal app doesn't end your session.
 const everOpened = ref(false);
 watch(() => props.open, (open) => { if (open) everOpened.value = true; }, { immediate: true });
@@ -21,14 +22,14 @@ watch(() => props.open, (open) => { if (open) everOpened.value = true; }, { imme
       <v-icon name="fa-terminal" scale="0.8" class="text-emerald-400" />
       <h2 class="text-xs font-semibold text-white">Terminal</h2>
       <div class="flex-1" />
-      <button class="rounded p-1 text-slate-400 hover:bg-slate-800 hover:text-white" title="Hide (keeps the shells running)" @click="emit('close')">
+      <button class="rounded p-1 text-slate-400 hover:bg-slate-800 hover:text-white" title="Hide (keeps the shell running)" @click="emit('close')">
         <v-icon name="fa-times" scale="0.75" />
       </button>
     </div>
     <div class="grid min-h-0 flex-1 grid-cols-2 divide-x divide-slate-800">
       <template v-if="everOpened">
         <TerminalPane />
-        <TerminalPane />
+        <CommandLogList :active="open" />
       </template>
     </div>
   </div>

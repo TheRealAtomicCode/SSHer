@@ -27,6 +27,13 @@ const TILES: { view: View; title: string; text: string; icon: string; tone: stri
     tone: 'from-amber-500/20 text-amber-300 ring-amber-500/30',
   },
   {
+    view: 'processes',
+    title: 'Processes',
+    text: 'Every running process, filterable — terminate or force-kill one.',
+    icon: 'fa-microchip',
+    tone: 'from-rose-500/20 text-rose-300 ring-rose-500/30',
+  },
+  {
     view: 'nginx',
     title: 'Nginx',
     text: 'Sites — enable, disable, edit — and add one by drag & drop, or for an app this page just noticed.',
