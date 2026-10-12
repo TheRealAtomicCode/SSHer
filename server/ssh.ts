@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { Client } from 'ssh2';
-import type { FileEntry, SFTPWrapper, Stats } from 'ssh2';
+import type { ClientChannel, FileEntry, SFTPWrapper, Stats } from 'ssh2';
 
 export interface SshSession {
   id: string;
@@ -141,6 +141,15 @@ export function execWithInput(
       });
       stream.end(input);
     });
+  });
+}
+
+/** Hands back the raw channel for `command` instead of buffering it, so its stdout can
+ *  be `.pipe()`d straight to an HTTP response — used to stream an on-the-fly zip without
+ *  ever writing it to disk, the same way `/api/download` pipes an SFTP read stream. */
+export function execChannel(session: SshSession, command: string): Promise<ClientChannel> {
+  return new Promise((resolve, reject) => {
+    session.conn.exec(command, (err, stream) => (err ? reject(err) : resolve(stream)));
   });
 }
 

@@ -14,6 +14,7 @@ const emit = defineEmits<{
   select: [RemoteFile, MouseEvent];
   open: [RemoteFile];
   menu: [MouseEvent, RemoteFile];
+  dragstart: [DragEvent, RemoteFile];
 }>();
 </script>
 
@@ -51,9 +52,11 @@ const emit = defineEmits<{
             : 'border-transparent hover:bg-slate-900',
           cutPaths.includes(file.path) ? 'opacity-40' : '',
         ]"
+        draggable="true"
         @click="emit('select', file, $event)"
         @dblclick="emit('open', file)"
         @contextmenu.prevent.stop="emit('menu', $event, file)"
+        @dragstart="emit('dragstart', $event, file)"
       >
         <v-icon :name="iconFor(file)" :class="iconColor(file)" scale="2.1" />
         <span class="w-full truncate text-center text-xs text-slate-300">{{ file.name }}</span>
@@ -84,9 +87,11 @@ const emit = defineEmits<{
             selected.has(file.path) ? 'bg-emerald-500/10' : 'hover:bg-slate-900',
             cutPaths.includes(file.path) ? 'opacity-40' : '',
           ]"
+          draggable="true"
           @click="emit('select', file, $event)"
           @dblclick="emit('open', file)"
           @contextmenu.prevent.stop="emit('menu', $event, file)"
+          @dragstart="emit('dragstart', $event, file)"
         >
           <td class="px-3 py-2">
             <div class="flex items-center gap-2.5">

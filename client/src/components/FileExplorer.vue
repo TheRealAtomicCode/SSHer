@@ -3,11 +3,13 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import * as api from '../api';
 import type { UploadItem } from '../api';
 import { itemsFromDrop } from '../dnd';
-import { appFor, cdCommand, copyToClipboard, normalizePathInput, typeKey, typeLabel } from '../files';
+import { appFor, archiveFormat, cdCommand, copyToClipboard, normalizePathInput, typeKey, typeLabel } from '../files';
 import * as prefs from '../prefs';
 import { fail, notify } from '../toast';
 import type {
+  ArchiveSupport,
   Clipboard,
+  CompressFormat,
   FileApp,
   Listing,
   RemoteFile,
@@ -15,6 +17,7 @@ import type {
   UndoEntry,
   ViewMode,
 } from '../types';
+import CompressDialog from './CompressDialog.vue';
 import ContextMenu from './ContextMenu.vue';
 import FileList from './FileList.vue';
 import ImageViewer from './ImageViewer.vue';
@@ -57,6 +60,9 @@ const uploadDest = ref('/');
 const uploading = ref(false);
 const progress = ref(0);
 const dragging = ref(false);
+
+const archiveSupport = ref<ArchiveSupport | null>(null);
+const compressDialog = ref<{ paths: string[]; initialName: string } | null>(null);
 
 let loadedOnce = false;
 const pathBar = ref<{ startEdit: () => void } | null>(null);
@@ -417,6 +423,78 @@ async function copyCurrentPath() {
   );
 }
 
+// --------------------------------------------------------------- archives
+
+const canExtractSelected = computed(() => {
+  const file = onlySelected.value;
+  if (!file || file.isDirectory || !archiveSupport.value) return false;
+  const format = archiveFormat(file.name);
+  return Boolean(format && archiveSupport.value.extract[format]);
+});
+
+function askCompress() {
+  const targets = selectedFiles.value;
+  if (!targets.length) return;
+  const initialName = targets.length === 1 ? targets[0].name.replace(/\.[^.]+$/, '') : basename(cwd.value) || 'Archive';
+  compressDialog.value = { paths: targets.map((f) => f.path), initialName };
+}
+
+async function onCompressSubmit(name: string, format: CompressFormat) {
+  const paths = compressDialog.value?.paths ?? [];
+  compressDialog.value = null;
+  if (!paths.length) return;
+  await run(async () => {
+    await api.compress(paths, name, format);
+    await load(cwd.value);
+  }, `Compressed ${paths.length} item${paths.length === 1 ? '' : 's'} to ${name}`);
+}
+
+async function doExtract(file: RemoteFile) {
+  await run(async () => {
+    const res = await api.extract(file.path);
+    await load(cwd.value);
+    notify(`Extracted to ${res.path}`);
+  });
+}
+
+const COMPRESS_EXT: Record<CompressFormat, string> = {
+  zip: '.zip',
+  'tar.gz': '.tar.gz',
+  'tar.bz2': '.tar.bz2',
+  'tar.xz': '.tar.xz',
+};
+
+/** Picks whichever archive format the connected server can actually produce,
+ *  preferring .zip since it opens natively on Windows/Mac/Linux alike. */
+function bestCompressFormat(): CompressFormat | null {
+  const support = archiveSupport.value?.compress;
+  if (!support) return null;
+  return (['zip', 'tar.gz', 'tar.bz2', 'tar.xz'] as const).find((f) => support[f]) ?? null;
+}
+
+/** Drag a file or folder out of the browser window onto the desktop — see
+ *  `server/archive.ts`'s `/api/archive/download-zip` for how a multi-selection or a
+ *  folder is zipped on the fly. Chromium/WebKit only; Firefox has no equivalent. */
+function onFileDragStart(event: DragEvent, file: RemoteFile) {
+  if (!event.dataTransfer) return;
+  const dragWholeSelection = selectedPaths.value.has(file.path) && selectedPaths.value.size > 1;
+  const targets = dragWholeSelection ? selectedFiles.value : [file];
+  event.dataTransfer.effectAllowed = 'copy';
+
+  if (targets.length === 1 && !targets[0].isDirectory) {
+    const url = `${location.origin}${api.fileUrl(targets[0].path)}`;
+    event.dataTransfer.setData('DownloadURL', `application/octet-stream:${targets[0].name}:${url}`);
+    return;
+  }
+
+  const format = bestCompressFormat();
+  if (!format) return; // No zip/tar on the server — nothing sensible to offer.
+  const name = (targets.length === 1 ? targets[0].name : basename(cwd.value) || 'files') + COMPRESS_EXT[format];
+  const url = `${location.origin}${api.zipDownloadUrl(targets.map((f) => f.path), name, format)}`;
+  const mime = format === 'zip' ? 'application/zip' : 'application/gzip';
+  event.dataTransfer.setData('DownloadURL', `${mime}:${name}:${url}`);
+}
+
 function setView(mode: ViewMode) {
   view.value = mode;
   prefs.setViewMode(mode);
@@ -526,6 +604,7 @@ function onKeydown(event: KeyboardEvent) {
 
 onMounted(() => {
   window.addEventListener('keydown', onKeydown);
+  api.archiveSupport().then((s) => (archiveSupport.value = s)).catch(() => {});
 });
 
 // Load the home folder the first time the explorer is shown, unless a shortcut
@@ -688,6 +767,7 @@ onUnmounted(() => {
             menu = { x: event.clientX, y: event.clientY, file };
           }
         "
+        @dragstart="onFileDragStart"
       />
     </div>
 
@@ -698,6 +778,7 @@ onUnmounted(() => {
       :file="menu.file"
       :count="selectedPaths.size"
       :can-paste="Boolean(clipboard)"
+      :can-extract="canExtractSelected"
       @close="menu = null"
       @open="open"
       @open-with="(file, app) => openWith(file, app, true)"
@@ -711,6 +792,8 @@ onUnmounted(() => {
       @new-folder="askNewFolder"
       @upload="uploadOpen = true"
       @shortcut="shortcutFor"
+      @compress="askCompress"
+      @extract="doExtract"
     />
 
     <TextEditor
@@ -752,6 +835,14 @@ onUnmounted(() => {
     />
 
     <ShortcutHelp v-if="helpOpen" @close="helpOpen = false" />
+
+    <CompressDialog
+      v-if="compressDialog && archiveSupport"
+      :initial-name="compressDialog.initialName"
+      :support="archiveSupport.compress"
+      @submit="onCompressSubmit"
+      @close="compressDialog = null"
+    />
 
     <!-- Drop anywhere in the explorer, not just inside the upload dialog. -->
     <div

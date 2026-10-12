@@ -5,6 +5,7 @@ import posix from 'node:path/posix';
 import cors from 'cors';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import multer from 'multer';
+import { registerArchive } from './archive.js';
 import { registerOps } from './ops.js';
 import {
   connect,
@@ -461,6 +462,7 @@ app.post(
 );
 
 registerOps(app, requireSession as express.RequestHandler, asyncRoute, upload);
+registerArchive(app, requireSession as express.RequestHandler, asyncRoute);
 
 app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
   console.error('[api]', err.message);

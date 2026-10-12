@@ -65,6 +65,31 @@ export function isText(file: RemoteFile): boolean {
   return TEXT.has(ext) || CODE.has(ext);
 }
 
+/** Longest suffix first, so `.tar.gz` is recognized before a bare `.gz` would match —
+ *  mirrors `detectExtractFormat` in `server/archive.ts`. */
+const EXTRACT_SUFFIXES: [string, 'tar.gz' | 'tar.bz2' | 'tar.xz' | 'tar' | 'zip' | '7z' | 'rar'][] = [
+  ['.tar.gz', 'tar.gz'],
+  ['.tgz', 'tar.gz'],
+  ['.tar.bz2', 'tar.bz2'],
+  ['.tbz2', 'tar.bz2'],
+  ['.tar.xz', 'tar.xz'],
+  ['.txz', 'tar.xz'],
+  ['.tar', 'tar'],
+  ['.zip', 'zip'],
+  ['.7z', '7z'],
+  ['.rar', 'rar'],
+];
+
+/** Which archive format a filename is, if any — independent of whether the server
+ *  actually has the tool to extract it (callers check that against `ArchiveSupport`). */
+export function archiveFormat(name: string): 'tar.gz' | 'tar.bz2' | 'tar.xz' | 'tar' | 'zip' | '7z' | 'rar' | null {
+  const lower = name.toLowerCase();
+  for (const [suffix, format] of EXTRACT_SUFFIXES) {
+    if (lower.endsWith(suffix)) return format;
+  }
+  return null;
+}
+
 export function iconFor(file: RemoteFile): string {
   if (file.isDirectory) return 'fa-folder';
   const ext = extension(file.name);

@@ -1,6 +1,8 @@
 import type {
+  ArchiveSupport,
   ComposeInfo,
   ComposeOp,
+  CompressFormat,
   Container,
   Credentials,
   DeploySpec,
@@ -340,4 +342,39 @@ export function serviceAction(service: ServiceName, action: string): Promise<{ o
 
 export function exists(paths: string[]): Promise<{ found: Record<string, 'file' | 'dir'> }> {
   return request('/exists', { method: 'POST', body: json({ paths }) });
+}
+
+// ------------------------------------------------------------------ archive
+
+export function archiveSupport(): Promise<ArchiveSupport> {
+  return request('/archive/support');
+}
+
+export function compress(
+  paths: string[],
+  name: string,
+  format: CompressFormat,
+  overwrite = false,
+): Promise<{ path: string }> {
+  return request('/archive/compress', { method: 'POST', body: json({ paths, name, format, overwrite }) });
+}
+
+export function extract(path: string, dest?: string, overwrite = false): Promise<{ path: string }> {
+  return request('/archive/extract', { method: 'POST', body: json({ path, dest, overwrite }) });
+}
+
+/** A throwaway archive of `paths`, streamed on the fly — for dragging a multi-selection
+ *  or a folder out of the browser onto the desktop (see `onFileDragStart` in
+ *  `FileExplorer.vue`). Query string, not a POST: this URL is handed to the browser's
+ *  own download machinery via a `DownloadURL` drag, which cannot carry a request body
+ *  or headers — the same reason `fileUrl()` puts `sid`/`key` in the query string. */
+export function zipDownloadUrl(paths: string[], name: string, format: CompressFormat): string {
+  const params = new URLSearchParams({
+    paths: JSON.stringify(paths),
+    name,
+    format,
+    sid: sessionId ?? '',
+  });
+  if (accessKey) params.set('key', accessKey);
+  return `/api/archive/download-zip?${params.toString()}`;
 }

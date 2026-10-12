@@ -8,25 +8,25 @@ import posix from 'node:path/posix';
 import type { Express, NextFunction, Request, RequestHandler, Response } from 'express';
 import { exec, execWithInput, shellQuote, type ExecResult, type SshSession } from './ssh.js';
 
-interface SessionRequest extends Request {
+export interface SessionRequest extends Request {
   session?: SshSession;
 }
-type AsyncRoute = (
+export type AsyncRoute = (
   handler: (req: SessionRequest, res: Response) => Promise<void>,
 ) => (req: Request, res: Response, next: NextFunction) => void;
 
 // ------------------------------------------------------------------ helpers
 
 /** Non-root logins go through `sudo -n` (fails fast instead of hanging on a password prompt). */
-function asRoot(session: SshSession, command: string): string {
+export function asRoot(session: SshSession, command: string): string {
   return session.username === 'root' ? command : `sudo -n sh -c ${shellQuote(command)}`;
 }
 
-async function run(session: SshSession, command: string): Promise<ExecResult> {
+export async function run(session: SshSession, command: string): Promise<ExecResult> {
   return exec(session, asRoot(session, command));
 }
 
-async function runOrThrow(session: SshSession, command: string): Promise<string> {
+export async function runOrThrow(session: SshSession, command: string): Promise<string> {
   const result = await run(session, command);
   if (result.code !== 0) {
     throw new Error(
@@ -36,7 +36,7 @@ async function runOrThrow(session: SshSession, command: string): Promise<string>
   return result.stdout;
 }
 
-async function writeRemote(session: SshSession, path: string, content: string): Promise<void> {
+export async function writeRemote(session: SshSession, path: string, content: string): Promise<void> {
   const result = await execWithInput(
     session,
     asRoot(session, `tee ${shellQuote(path)} >/dev/null`),
@@ -45,9 +45,9 @@ async function writeRemote(session: SshSession, path: string, content: string): 
   if (result.code !== 0) throw new Error(result.stderr.trim() || `could not write ${path}`);
 }
 
-class BadRequest extends Error {}
+export class BadRequest extends Error {}
 
-const RE = {
+export const RE = {
   id: /^[A-Za-z0-9][A-Za-z0-9_.-]*$/,
   name: /^[a-z0-9][a-z0-9_-]{0,62}$/,
   image: /^[A-Za-z0-9][A-Za-z0-9._\-/:@]*$/,
@@ -59,18 +59,35 @@ const RE = {
   portSpec: /^\d{1,5}(:\d{1,5})?$/,
 };
 
-function need(ok: unknown, message: string): asserts ok {
+export function need(ok: unknown, message: string): asserts ok {
   if (!ok) throw new BadRequest(message);
 }
 
-function port(value: unknown, label: string): number {
+export function port(value: unknown, label: string): number {
   const n = Number(value);
   need(Number.isInteger(n) && n >= 1 && n <= 65535, `${label} must be a port between 1 and 65535`);
   return n;
 }
 
-function str(value: unknown): string {
+export function str(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
+}
+
+/** Wraps a route handler so a thrown `BadRequest` becomes a 400 instead of a 500 — the
+ *  same mapping every module's routes want, so each one calls this once with its own
+ *  `asyncRoute` rather than redefining the try/catch. */
+export function badRequestRoute(
+  asyncRoute: AsyncRoute,
+  handler: (req: SessionRequest, res: Response) => Promise<void>,
+) {
+  return asyncRoute(async (req, res) => {
+    try {
+      await handler(req, res);
+    } catch (err) {
+      if (err instanceof BadRequest) res.status(400).json({ error: err.message });
+      else throw err;
+    }
+  });
 }
 
 /** A YAML double-quoted scalar. JSON strings are valid YAML; `$` is doubled for compose. */
@@ -543,14 +560,7 @@ export function registerOps(
   upload: { single(field: string): RequestHandler },
 ): void {
   const route = (handler: (req: SessionRequest, res: Response) => Promise<void>) =>
-    asyncRoute(async (req, res) => {
-      try {
-        await handler(req, res);
-      } catch (err) {
-        if (err instanceof BadRequest) res.status(400).json({ error: err.message });
-        else throw err;
-      }
-    });
+    badRequestRoute(asyncRoute, handler);
 
   // ----------------------------------------------------------- docker: read
 

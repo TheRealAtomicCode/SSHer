@@ -9,6 +9,8 @@ const props = defineProps<{
   file: RemoteFile | null;
   count: number;
   canPaste: boolean;
+  /** Whether the single selected file is an archive this server can extract. */
+  canExtract: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -25,6 +27,8 @@ const emit = defineEmits<{
   newFolder: [];
   upload: [];
   shortcut: [RemoteFile | null];
+  compress: [];
+  extract: [RemoteFile];
 }>();
 
 const menu = ref<HTMLElement | null>(null);
@@ -143,6 +147,15 @@ const item =
       <button :class="item" :disabled="!canPaste" @click="emit('paste'); close()">
         <v-icon name="fa-paste" scale="0.8" /> Paste
         <span class="ml-auto text-xs text-slate-600">Ctrl+V</span>
+      </button>
+
+      <div class="my-1 border-t border-slate-800" />
+
+      <button :class="item" @click="emit('compress'); close()">
+        <v-icon name="fa-archive" scale="0.8" /> Compress…{{ many ? ` ${count} items` : '' }}
+      </button>
+      <button v-if="!many && isFile && canExtract" :class="item" @click="emit('extract', file); close()">
+        <v-icon name="fa-box-open" scale="0.8" /> Extract here
       </button>
 
       <div class="my-1 border-t border-slate-800" />

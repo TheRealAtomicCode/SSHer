@@ -1,6 +1,7 @@
 import { addIcons } from 'oh-vue-icons';
 import {
   FaAngleDown,
+  FaArchive,
   FaArrowLeft,
   FaArrowRight,
   FaBan,
@@ -79,10 +80,12 @@ import {
   FaUpload,
   FaUser,
   FaWrench,
+  SiDotnet,
 } from 'oh-vue-icons/icons';
 
 addIcons(
   FaAngleDown,
+  FaArchive,
   FaArrowLeft,
   FaArrowRight,
   FaBan,
@@ -161,4 +164,5 @@ addIcons(
   FaUpload,
   FaUser,
   FaWrench,
+  SiDotnet,
 );

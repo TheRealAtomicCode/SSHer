@@ -207,3 +207,12 @@ export interface PortsState {
   };
   sshPort: number;
 }
+
+// ----------------------------------------------------------------- archive
+
+export type CompressFormat = 'zip' | 'tar.gz' | 'tar.bz2' | 'tar.xz';
+
+export interface ArchiveSupport {
+  compress: Record<CompressFormat, boolean>;
+  extract: Record<'zip' | 'tar' | 'tar.gz' | 'tar.bz2' | 'tar.xz' | '7z' | 'rar', boolean>;
+}
