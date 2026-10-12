@@ -8,7 +8,10 @@ import multer from 'multer';
 import { registerArchive } from './archive.js';
 import { registerDotnet } from './dotnet.js';
 import { registerNginx } from './nginx.js';
-import { registerOps } from './ops.js';
+import { execMaybeRootOrThrow, registerOps } from './ops.js';
+import { registerPermissions } from './permissions.js';
+import { registerPostgres } from './postgres.js';
+import { registerUsers } from './users.js';
 import {
   connect,
   disconnect,
@@ -239,7 +242,7 @@ app.post(
   requireSession,
   asyncRoute(async (req, res) => {
     const session = req.session!;
-    const { path: target, newName } = req.body ?? {};
+    const { path: target, newName, sudo } = req.body ?? {};
     if (!target || !newName) {
       res.status(400).json({ error: 'path and newName are required' });
       return;
@@ -250,7 +253,10 @@ app.post(
     }
     const from = remotePath(session, target);
     const to = posix.join(posix.dirname(from), String(newName));
-    await rename(session, from, to);
+    // SFTP's own rename() cannot be run as root — sudo mode falls back to a
+    // shell `mv`, which can.
+    if (sudo) await execMaybeRootOrThrow(session, `mv -n -- ${shellQuote(from)} ${shellQuote(to)}`, true);
+    else await rename(session, from, to);
     res.json({ ok: true, path: to });
   }),
 );
@@ -261,7 +267,7 @@ app.post(
   asyncRoute(async (req, res) => {
     const session = req.session!;
     const dir = remotePath(session, req.body?.path);
-    await execOrThrow(session, `mkdir -p -- ${shellQuote(dir)}`);
+    await execMaybeRootOrThrow(session, `mkdir -p -- ${shellQuote(dir)}`, Boolean(req.body?.sudo));
     res.json({ ok: true, path: dir });
   }),
 );
@@ -280,7 +286,7 @@ app.post(
     // Undoing a mkdir asks for a non-recursive delete, so that it refuses to
     // remove a directory the user has since put something into.
     const recursive = req.body?.recursive !== false;
-    await execOrThrow(session, recursive ? `rm -rf -- ${args}` : `rmdir -- ${args}`);
+    await execMaybeRootOrThrow(session, recursive ? `rm -rf -- ${args}` : `rmdir -- ${args}`, Boolean(req.body?.sudo));
     res.json({ ok: true });
   }),
 );
@@ -290,7 +296,7 @@ app.post(
   requireSession,
   asyncRoute(async (req, res) => {
     const session = req.session!;
-    const { sources, dest, mode } = req.body ?? {};
+    const { sources, dest, mode, sudo } = req.body ?? {};
     const list: string[] = Array.isArray(sources) ? sources : [];
     if (!list.length || !dest) {
       res.status(400).json({ error: 'sources and dest are required' });
@@ -299,7 +305,7 @@ app.post(
     const destDir = remotePath(session, dest);
     const args = list.map((p) => shellQuote(remotePath(session, p))).join(' ');
     const command = mode === 'cut' ? 'mv --' : 'cp -r --';
-    await execOrThrow(session, `${command} ${args} ${shellQuote(destDir + '/')}`);
+    await execMaybeRootOrThrow(session, `${command} ${args} ${shellQuote(destDir + '/')}`, Boolean(sudo));
     res.json({ ok: true });
   }),
 );
@@ -467,6 +473,9 @@ registerOps(app, requireSession as express.RequestHandler, asyncRoute, upload);
 registerArchive(app, requireSession as express.RequestHandler, asyncRoute);
 registerNginx(app, requireSession as express.RequestHandler, asyncRoute, upload);
 registerDotnet(app, requireSession as express.RequestHandler, asyncRoute, upload);
+registerUsers(app, requireSession as express.RequestHandler, asyncRoute);
+registerPostgres(app, requireSession as express.RequestHandler, asyncRoute);
+registerPermissions(app, requireSession as express.RequestHandler, asyncRoute);
 
 app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
   console.error('[api]', err.message);

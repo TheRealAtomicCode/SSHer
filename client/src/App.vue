@@ -9,10 +9,13 @@ import HomeView from './components/HomeView.vue';
 import LogsView from './components/LogsView.vue';
 import NginxView from './components/NginxView.vue';
 import PortsView from './components/PortsView.vue';
+import PostgresView from './components/PostgresView.vue';
 import QuickLinksView from './components/QuickLinksView.vue';
 import ShortcutDialog from './components/ShortcutDialog.vue';
 import ShortcutsView from './components/ShortcutsView.vue';
+import UsersView from './components/UsersView.vue';
 import * as prefs from './prefs';
+import { sudoMode, toggleSudoMode } from './sudoMode';
 import { fail, notify, sessionState, toasts } from './toast';
 import type { Credentials, Session, Shortcut, View } from './types';
 
@@ -150,16 +153,30 @@ const NAV: { view: View; label: string; icon: string; sub?: boolean }[] = [
   { view: 'files', label: 'File Explorer', icon: 'fa-folder-open' },
   { view: 'shortcuts', label: 'Shortcuts', icon: 'fa-star', sub: true },
   { view: 'links', label: 'Quick Links', icon: 'fa-link' },
+  { view: 'users', label: 'Users', icon: 'fa-users' },
   { view: 'nginx', label: 'Nginx', icon: 'fa-globe' },
   { view: 'dotnet', label: '.NET apps', icon: 'si-dotnet' },
   { view: 'docker', label: 'Docker', icon: 'fa-docker' },
   { view: 'logs', label: 'Container logs', icon: 'fa-terminal', sub: true },
   { view: 'ports', label: 'Ports & Firewall', icon: 'fa-shield-alt' },
+  { view: 'postgres', label: 'PostgreSQL', icon: 'fa-database' },
 ];
 </script>
 
 <template>
   <div class="flex h-full flex-col bg-slate-950">
+    <!-- Sudo mode: fixed at the very top, visible from every page. -->
+    <button
+      v-if="session"
+      class="flex shrink-0 items-center justify-center gap-1.5 py-1 text-xs font-medium transition"
+      :class="sudoMode.enabled ? 'bg-red-600 text-white hover:bg-red-500' : 'bg-slate-900 text-slate-500 hover:text-slate-300'"
+      :title="sudoMode.enabled ? 'Click to turn sudo mode off' : 'Click to run File Explorer actions as root'"
+      @click="toggleSudoMode"
+    >
+      <v-icon :name="sudoMode.enabled ? 'fa-unlock-alt' : 'fa-lock'" scale="0.7" />
+      {{ sudoMode.enabled ? 'Sudo mode is ON — File Explorer actions run as root' : 'Sudo mode is off' }}
+    </button>
+
     <div v-if="access === 'needed'" class="flex min-h-full items-center justify-center p-6">
       <form
         class="w-full max-w-sm rounded-2xl border border-slate-800 bg-slate-900/60 p-6 shadow-xl"
@@ -298,6 +315,8 @@ const NAV: { view: View; label: string; icon: string; sub?: boolean }[] = [
 
         <QuickLinksView v-if="view === 'links'" @open-path="openShortcut" />
 
+        <UsersView v-if="view === 'users'" :session="session" />
+
         <NginxView v-if="view === 'nginx'" @open-path="openShortcut" />
 
         <DotNetView v-if="view === 'dotnet'" />
@@ -312,6 +331,8 @@ const NAV: { view: View; label: string; icon: string; sub?: boolean }[] = [
         <LogsView v-if="view === 'logs'" :initial="logsFor" />
 
         <PortsView v-if="view === 'ports'" :session="session" />
+
+        <PostgresView v-if="view === 'postgres'" />
       </main>
     </div>
 

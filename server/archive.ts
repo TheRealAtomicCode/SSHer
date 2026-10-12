@@ -4,8 +4,8 @@
 // zip without duplicating the quoting logic.
 import posix from 'node:path/posix';
 import type { Express, Response } from 'express';
-import { badRequestRoute, need, RE, str, type AsyncRoute, type SessionRequest } from './ops.js';
-import { exec, execChannel, execOrThrow, shellQuote as shQuote, type SshSession } from './ssh.js';
+import { badRequestRoute, execMaybeRoot, execMaybeRootOrThrow, need, RE, str, type AsyncRoute, type SessionRequest } from './ops.js';
+import { exec, execChannel, shellQuote as shQuote, type SshSession } from './ssh.js';
 
 // ------------------------------------------------------------------ helpers
 
@@ -230,13 +230,14 @@ export function registerArchive(app: Express, requireSession: import('express').
       const support = await checkSupport(session);
       need(canCompress(support, format), `${format} is not supported on this server (missing ${COMPRESS_TOOL[format].join('/')})`);
 
+      const sudo = Boolean(req.body?.sudo);
       const target = posix.join(dir, name);
       if (!req.body?.overwrite) {
-        const exists = await exec(session, `[ -e ${shQuote(target)} ] && echo yes || true`);
+        const exists = await execMaybeRoot(session, `[ -e ${shQuote(target)} ] && echo yes || true`, sudo);
         need(exists.stdout.trim() !== 'yes', `${name} already exists — tick overwrite or pick another name`);
       }
 
-      await execOrThrow(session, compressCommand(dir, names, name, format));
+      await execMaybeRootOrThrow(session, compressCommand(dir, names, name, format), sudo);
       res.json({ ok: true, path: target });
     }),
   );
@@ -260,12 +261,13 @@ export function registerArchive(app: Express, requireSession: import('express').
       const dest = str(req.body?.dest) || posix.join(parent, base);
       need(RE.absPath.test(dest), 'Invalid destination');
 
+      const sudo = Boolean(req.body?.sudo);
       if (!req.body?.overwrite) {
-        const exists = await exec(session, `[ -e ${shQuote(dest)} ] && echo yes || true`);
+        const exists = await execMaybeRoot(session, `[ -e ${shQuote(dest)} ] && echo yes || true`, sudo);
         need(exists.stdout.trim() !== 'yes', `${posix.basename(dest)} already exists here — tick overwrite or pick another destination`);
       }
 
-      await execOrThrow(session, `mkdir -p -- ${shQuote(dest)}`);
+      await execMaybeRootOrThrow(session, `mkdir -p -- ${shQuote(dest)}`, sudo);
       const cmd =
         format === 'zip'
           ? `unzip -o -q ${shQuote(path)} -d ${shQuote(dest)}`
@@ -274,7 +276,7 @@ export function registerArchive(app: Express, requireSession: import('express').
             : format === 'rar'
               ? `unrar x -o+ ${shQuote(path)} ${shQuote(dest)}/`
               : `tar xf ${shQuote(path)} -C ${shQuote(dest)}`;
-      await execOrThrow(session, cmd);
+      await execMaybeRootOrThrow(session, cmd, sudo);
       res.json({ ok: true, path: dest });
     }),
   );

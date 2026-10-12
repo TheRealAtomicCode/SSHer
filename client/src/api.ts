@@ -1,4 +1,5 @@
 import type {
+  AclEntry,
   ArchiveSupport,
   ComposeInfo,
   ComposeOp,
@@ -12,16 +13,26 @@ import type {
   DotnetContext,
   DotnetDeploySpec,
   DotnetInspectResult,
+  FilePermissions,
   ImageInfo,
   Listing,
   LocalApp,
   NginxSite,
   NginxSiteSpec,
   PortsState,
+  PostgresContext,
+  PostgresDatabase,
+  PostgresRole,
+  PostgresTablePrivilege,
+  PostgresTablePrivileges,
   Session,
   StepResult,
+  SudoChange,
+  SystemGroup,
+  SystemUser,
   TextContent,
 } from './types';
+import { sudoMode } from './sudoMode';
 
 /** Carries the JSON body of a failed response, e.g. the step log of a failed deploy. */
 export class ApiError extends Error {
@@ -132,16 +143,16 @@ export function list(path: string): Promise<Listing> {
 }
 
 export function rename(path: string, newName: string): Promise<{ path: string }> {
-  return request('/rename', { method: 'POST', body: json({ path, newName }) });
+  return request('/rename', { method: 'POST', body: json({ path, newName, sudo: sudoMode.enabled }) });
 }
 
 export function mkdir(path: string): Promise<void> {
-  return request('/mkdir', { method: 'POST', body: json({ path }) });
+  return request('/mkdir', { method: 'POST', body: json({ path, sudo: sudoMode.enabled }) });
 }
 
 /** `recursive: false` maps to rmdir, which refuses to delete a non-empty directory. */
 export function remove(paths: string[], recursive = true): Promise<void> {
-  return request('/delete', { method: 'POST', body: json({ paths, recursive }) });
+  return request('/delete', { method: 'POST', body: json({ paths, recursive, sudo: sudoMode.enabled }) });
 }
 
 export function saveText(path: string, content: string): Promise<{ size: number }> {
@@ -149,7 +160,7 @@ export function saveText(path: string, content: string): Promise<{ size: number 
 }
 
 export function paste(sources: string[], dest: string, mode: 'copy' | 'cut'): Promise<void> {
-  return request('/paste', { method: 'POST', body: json({ sources, dest, mode }) });
+  return request('/paste', { method: 'POST', body: json({ sources, dest, mode, sudo: sudoMode.enabled }) });
 }
 
 export function readText(path: string): Promise<TextContent> {
@@ -427,11 +438,11 @@ export function compress(
   format: CompressFormat,
   overwrite = false,
 ): Promise<{ path: string }> {
-  return request('/archive/compress', { method: 'POST', body: json({ paths, name, format, overwrite }) });
+  return request('/archive/compress', { method: 'POST', body: json({ paths, name, format, overwrite, sudo: sudoMode.enabled }) });
 }
 
 export function extract(path: string, dest?: string, overwrite = false): Promise<{ path: string }> {
-  return request('/archive/extract', { method: 'POST', body: json({ path, dest, overwrite }) });
+  return request('/archive/extract', { method: 'POST', body: json({ path, dest, overwrite, sudo: sudoMode.enabled }) });
 }
 
 /** A throwaway archive of `paths`, streamed on the fly — for dragging a multi-selection
@@ -448,4 +459,100 @@ export function zipDownloadUrl(paths: string[], name: string, format: CompressFo
   });
   if (accessKey) params.set('key', accessKey);
   return `/api/archive/download-zip?${params.toString()}`;
+}
+
+// -------------------------------------------------------------------- users
+
+export function users(): Promise<{ users: SystemUser[]; groups: SystemGroup[] }> {
+  return request('/users');
+}
+
+export function setUserSudo(name: string, change: SudoChange): Promise<void> {
+  return request(`/users/${encodeURIComponent(name)}/sudo`, { method: 'POST', body: json(change) });
+}
+
+// ----------------------------------------------------------- file permissions
+
+export function filePermissions(path: string): Promise<FilePermissions> {
+  const params = new URLSearchParams({ path, sudo: sudoMode.enabled ? '1' : '0' });
+  return request(`/files/permissions?${params.toString()}`);
+}
+
+export function setFilePermissions(
+  paths: string[],
+  changes: { mode?: string; owner?: string; group?: string; recursive?: boolean },
+): Promise<void> {
+  return request('/files/permissions', { method: 'POST', body: json({ paths, ...changes, sudo: sudoMode.enabled }) });
+}
+
+export function setFileAcl(
+  paths: string[],
+  opts: { user: string; perms?: string; recursive?: boolean; alsoDefault?: boolean; remove?: boolean },
+): Promise<void> {
+  return request('/files/acl', { method: 'POST', body: json({ paths, ...opts, sudo: sudoMode.enabled }) });
+}
+
+// ----------------------------------------------------------------- postgres
+
+export function postgresContext(): Promise<PostgresContext> {
+  return request('/postgres/context');
+}
+
+export function postgresRoles(): Promise<{ roles: PostgresRole[] }> {
+  return request('/postgres/roles');
+}
+
+export function postgresCreateRole(spec: {
+  name: string;
+  login: boolean;
+  password?: string;
+  superuser?: boolean;
+  createdb?: boolean;
+  createrole?: boolean;
+}): Promise<void> {
+  return request('/postgres/roles', { method: 'POST', body: json(spec) });
+}
+
+export function postgresDeleteRole(name: string): Promise<void> {
+  return request(`/postgres/roles/${encodeURIComponent(name)}/delete`, { method: 'POST' });
+}
+
+export function postgresSetPassword(name: string, password: string): Promise<void> {
+  return request(`/postgres/roles/${encodeURIComponent(name)}/password`, { method: 'POST', body: json({ password }) });
+}
+
+export function postgresSetAttributes(
+  name: string,
+  attrs: { superuser?: boolean; createdb?: boolean; createrole?: boolean; canlogin?: boolean },
+): Promise<void> {
+  return request(`/postgres/roles/${encodeURIComponent(name)}/attributes`, { method: 'POST', body: json(attrs) });
+}
+
+export function postgresDatabases(): Promise<{ databases: PostgresDatabase[] }> {
+  return request('/postgres/databases');
+}
+
+export function postgresSchemas(db: string): Promise<{ schemas: string[] }> {
+  return request(`/postgres/databases/${encodeURIComponent(db)}/schemas`);
+}
+
+export function postgresTables(
+  db: string,
+  schema: string,
+  role: string,
+): Promise<{ tables: PostgresTablePrivileges[]; connect: boolean }> {
+  return request(`/postgres/databases/${encodeURIComponent(db)}/schemas/${encodeURIComponent(schema)}/tables?role=${encodeURIComponent(role)}`);
+}
+
+export function postgresGrant(spec: {
+  db: string;
+  role: string;
+  kind: 'database' | 'table' | 'schema';
+  schema?: string;
+  table?: string;
+  privilege?: PostgresTablePrivilege;
+  grant: boolean;
+  includeFuture?: boolean;
+}): Promise<void> {
+  return request('/postgres/grant', { method: 'POST', body: json(spec) });
 }

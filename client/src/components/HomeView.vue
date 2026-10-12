@@ -20,6 +20,13 @@ const TILES: { view: View; title: string; text: string; icon: string; tone: stri
     tone: 'from-emerald-500/20 text-emerald-300 ring-emerald-500/30',
   },
   {
+    view: 'users',
+    title: 'Users',
+    text: 'Accounts, groups and sudo access — plus file permissions and ACLs from the File Explorer.',
+    icon: 'fa-users',
+    tone: 'from-amber-500/20 text-amber-300 ring-amber-500/30',
+  },
+  {
     view: 'nginx',
     title: 'Nginx',
     text: 'Sites — enable, disable, edit — and add one by drag & drop, or for an app this page just noticed.',
@@ -46,6 +53,13 @@ const TILES: { view: View; title: string; text: string; icon: string; tone: stri
     text: 'What is listening, what is exposed to the internet, and the ufw rules.',
     icon: 'fa-shield-alt',
     tone: 'from-rose-500/20 text-rose-300 ring-rose-500/30',
+  },
+  {
+    view: 'postgres',
+    title: 'PostgreSQL',
+    text: 'Roles, passwords, and who can SELECT/INSERT/UPDATE/DELETE on which tables.',
+    icon: 'fa-database',
+    tone: 'from-sky-500/20 text-sky-300 ring-sky-500/30',
   },
 ];
 </script>

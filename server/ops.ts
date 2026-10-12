@@ -36,6 +36,20 @@ export async function runOrThrow(session: SshSession, command: string): Promise<
   return result.stdout;
 }
 
+/** File Explorer / archive / permissions actions are unprivileged by default
+ *  (same level as plain SFTP). The sudo-mode toggle in the client header lets a
+ *  request opt into running as root instead — never the reverse, so a stray
+ *  request can't accidentally escalate on its own. */
+export function execMaybeRoot(session: SshSession, command: string, sudo: boolean): Promise<ExecResult> {
+  return exec(session, sudo ? asRoot(session, command) : command);
+}
+
+export async function execMaybeRootOrThrow(session: SshSession, command: string, sudo: boolean): Promise<string> {
+  const result = await execMaybeRoot(session, command, sudo);
+  if (result.code !== 0) throw new Error(result.stderr.trim() || result.stdout.trim() || `command failed with exit code ${result.code}`);
+  return result.stdout;
+}
+
 export async function writeRemote(session: SshSession, path: string, content: string): Promise<void> {
   const result = await execWithInput(
     session,

@@ -84,7 +84,18 @@ export interface Shortcut {
   createdAt: number;
 }
 
-export type View = 'home' | 'files' | 'shortcuts' | 'links' | 'nginx' | 'docker' | 'dotnet' | 'logs' | 'ports';
+export type View =
+  | 'home'
+  | 'files'
+  | 'shortcuts'
+  | 'links'
+  | 'users'
+  | 'nginx'
+  | 'docker'
+  | 'dotnet'
+  | 'logs'
+  | 'ports'
+  | 'postgres';
 
 // ------------------------------------------------------------------- docker
 
@@ -287,3 +298,86 @@ export interface DotnetApp {
   port: number;
   dir: string;
 }
+
+// -------------------------------------------------------------------- users
+
+export interface SystemUser {
+  name: string;
+  uid: number;
+  gid: number;
+  comment: string;
+  home: string;
+  shell: string;
+  groups: string[];
+  canLogin: boolean;
+  locked: boolean;
+  hasPassword: boolean;
+  sudoGroup: boolean;
+  sudoFile: boolean;
+}
+
+export interface SystemGroup {
+  name: string;
+  gid: number;
+  members: string[];
+}
+
+export interface SudoChange {
+  group?: boolean;
+  passwordless?: boolean;
+  rule?: string;
+  removeAll?: boolean;
+  confirmSelf?: boolean;
+}
+
+// ----------------------------------------------------------- file permissions
+
+export interface AclEntry {
+  tag: string;
+  name?: string;
+  perms: string;
+  default: boolean;
+}
+
+export interface FilePermissions {
+  owner: string;
+  group: string;
+  mode: string;
+  hasAcl: boolean;
+  acl: AclEntry[];
+}
+
+// ----------------------------------------------------------------- postgres
+
+export interface PostgresContext {
+  installed: boolean;
+  running: boolean;
+  reachable: boolean;
+  version: string;
+  error: string;
+}
+
+export interface PostgresRole {
+  name: string;
+  superuser: boolean;
+  createdb: boolean;
+  createrole: boolean;
+  canlogin: boolean;
+  validuntil: string | null;
+  memberof: string[];
+}
+
+export interface PostgresDatabase {
+  name: string;
+  owner: string;
+}
+
+export interface PostgresTablePrivileges {
+  name: string;
+  select: boolean;
+  insert: boolean;
+  update: boolean;
+  delete: boolean;
+}
+
+export type PostgresTablePrivilege = 'SELECT' | 'INSERT' | 'UPDATE' | 'DELETE';

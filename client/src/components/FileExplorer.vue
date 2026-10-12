@@ -22,6 +22,7 @@ import ContextMenu from './ContextMenu.vue';
 import FileList from './FileList.vue';
 import ImageViewer from './ImageViewer.vue';
 import PathBar from './PathBar.vue';
+import PermissionsDialog from './PermissionsDialog.vue';
 import PromptDialog from './PromptDialog.vue';
 import ShortcutHelp from './ShortcutHelp.vue';
 import TextEditor from './TextEditor.vue';
@@ -63,6 +64,7 @@ const dragging = ref(false);
 
 const archiveSupport = ref<ArchiveSupport | null>(null);
 const compressDialog = ref<{ paths: string[]; initialName: string } | null>(null);
+const permissionsFiles = ref<RemoteFile[] | null>(null);
 
 let loadedOnce = false;
 const pathBar = ref<{ startEdit: () => void } | null>(null);
@@ -457,6 +459,11 @@ async function doExtract(file: RemoteFile) {
   });
 }
 
+function openPermissions() {
+  const targets = selectedFiles.value;
+  if (targets.length) permissionsFiles.value = targets;
+}
+
 const COMPRESS_EXT: Record<CompressFormat, string> = {
   zip: '.zip',
   'tar.gz': '.tar.gz',
@@ -794,6 +801,7 @@ onUnmounted(() => {
       @shortcut="shortcutFor"
       @compress="askCompress"
       @extract="doExtract"
+      @permissions="openPermissions"
     />
 
     <TextEditor
@@ -842,6 +850,13 @@ onUnmounted(() => {
       :support="archiveSupport.compress"
       @submit="onCompressSubmit"
       @close="compressDialog = null"
+    />
+
+    <PermissionsDialog
+      v-if="permissionsFiles"
+      :files="permissionsFiles"
+      @close="permissionsFiles = null"
+      @changed="load(cwd)"
     />
 
     <!-- Drop anywhere in the explorer, not just inside the upload dialog. -->

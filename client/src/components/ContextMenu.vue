@@ -29,6 +29,7 @@ const emit = defineEmits<{
   shortcut: [RemoteFile | null];
   compress: [];
   extract: [RemoteFile];
+  permissions: [];
 }>();
 
 const menu = ref<HTMLElement | null>(null);
@@ -173,6 +174,9 @@ const item =
       <button v-if="!many" :class="item" @click="emit('shortcut', file); close()">
         <v-icon name="fa-star" scale="0.8" class="text-amber-300" /> Add to shortcuts
         <span class="ml-auto text-xs text-slate-600">Ctrl+D</span>
+      </button>
+      <button :class="item" @click="emit('permissions'); close()">
+        <v-icon name="fa-user-cog" scale="0.8" /> Permissions…
       </button>
 
       <div class="my-1 border-t border-slate-800" />
