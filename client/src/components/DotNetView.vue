@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue';
 import * as api from '../api';
 import { fail, notify } from '../toast';
+import { newTransferId, watchTransfer } from '../transferProgress';
 import type { DotnetApp, DotnetContext, DotnetInspectResult } from '../types';
 import DotnetDeployWizard from './DotnetDeployWizard.vue';
 
@@ -32,6 +33,7 @@ async function installDotnet() {
 const dropping = ref(false);
 const inspecting = ref(false);
 const inspectProgress = ref<number | null>(null);
+const inspectStage = ref('Uploading…');
 let dragDepth = 0;
 
 /** Set when a drop/pick is meant to replace an existing app rather than create a new one. */
@@ -86,12 +88,34 @@ async function inspectFile(file: File) {
   redeployTarget.value = '';
   inspecting.value = true;
   inspectProgress.value = 0;
+  inspectStage.value = 'Uploading…';
+  const transferId = newTransferId();
+  let watching = false;
+  let stopWatch = () => {};
   try {
-    const res = await api.dotnetInspect(file, (p) => (inspectProgress.value = p));
+    const res = await api.dotnetInspect(
+      file,
+      (p) => {
+        inspectProgress.value = p;
+        // Browser progress only covers getting the zip to this server — the
+        // relay on to the actual remote target afterward was previously
+        // invisible.
+        if (p >= 100 && !watching) {
+          watching = true;
+          inspectStage.value = 'Copying to the server…';
+          inspectProgress.value = 0;
+          stopWatch = watchTransfer(transferId, (state) => {
+            inspectProgress.value = state.total ? Math.round((state.transferred / state.total) * 100) : 0;
+          });
+        }
+      },
+      transferId,
+    );
     wizard.value = redeployName ? { ...res, suggestedName: redeployName } : res;
   } catch (err) {
     fail(err);
   } finally {
+    stopWatch();
     inspecting.value = false;
     inspectProgress.value = null;
   }
@@ -272,7 +296,7 @@ const STATE_TONE: Record<string, string> = {
       class="fixed bottom-4 left-1/2 z-40 w-96 -translate-x-1/2 rounded-xl border border-slate-700 bg-slate-900 p-3 shadow-2xl"
     >
       <div class="mb-1.5 flex justify-between gap-2 text-xs text-slate-400">
-        <span>Uploading…</span>
+        <span>{{ inspectStage }}</span>
         <span class="tabular-nums">{{ inspectProgress }}%</span>
       </div>
       <div class="h-1.5 overflow-hidden rounded-full bg-slate-800">

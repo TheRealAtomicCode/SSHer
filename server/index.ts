@@ -8,11 +8,12 @@ import multer from 'multer';
 import { registerArchive } from './archive.js';
 import { registerDotnet } from './dotnet.js';
 import { registerNginx } from './nginx.js';
-import { execMaybeRootOrThrow, registerOps } from './ops.js';
+import { execMaybeRootOrThrow, registerOps, str } from './ops.js';
 import { registerPermissions } from './permissions.js';
 import { registerPostgres } from './postgres.js';
 import { registerProcesses } from './processes.js';
 import { registerTerminal } from './terminal.js';
+import { advanceTransfer, finishTransfer, getTransfer, startTransfer } from './transfers.js';
 import { registerUsers } from './users.js';
 import {
   connect,
@@ -182,6 +183,13 @@ app.get('/api/session', requireSession, (req: SessionRequest, res: Response) => 
  *  here, regardless of which page it was clicked on. */
 app.get('/api/command-log', requireSession, (req: SessionRequest, res: Response) => {
   res.json({ entries: req.session!.commandLog });
+});
+
+/** No session required: a transfer id is itself an unguessable token, and
+ *  polling it shouldn't fail just because the page happened to reconnect
+ *  mid-upload. Unknown/expired ids just report as done-with-nothing-to-show. */
+app.get('/api/transfer-progress/:id', (req: Request, res: Response) => {
+  res.json(getTransfer(req.params.id) ?? { total: 0, transferred: 0, done: true, error: '' });
 });
 
 app.get(
@@ -442,6 +450,14 @@ app.post(
     const destDir = remotePath(session, req.body?.dest);
     const uploaded: string[] = [];
 
+    // The browser's own upload progress only covers the browser→this-server
+    // leg; relaying on to the actual remote server over SFTP is the part that
+    // was previously invisible, which is what this tracks (see transfers.ts).
+    const transferId = str(req.body?.transferId);
+    const total = files.reduce((sum, f) => sum + f.size, 0);
+    if (transferId) startTransfer(transferId, total);
+    let sent = 0;
+
     try {
       await execOrThrow(session, `mkdir -p -- ${shellQuote(destDir)}`);
 
@@ -462,6 +478,7 @@ app.post(
         await new Promise<void>((resolve, reject) => {
           const read = createReadStream(file.path);
           const write = session.sftp.createWriteStream(target);
+          if (transferId) read.on('data', (chunk: string | Buffer) => advanceTransfer(transferId, (sent += chunk.length)));
           read.on('error', reject);
           write.on('error', reject);
           write.on('close', resolve);
@@ -469,6 +486,10 @@ app.post(
         });
         uploaded.push(target);
       }
+      if (transferId) finishTransfer(transferId);
+    } catch (err) {
+      if (transferId) finishTransfer(transferId, (err as Error).message);
+      throw err;
     } finally {
       await Promise.all(files.map((file) => fs.unlink(file.path).catch(() => {})));
     }

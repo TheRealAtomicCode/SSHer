@@ -191,12 +191,21 @@ export async function upload(
   items: UploadItem[],
   dest: string,
   onProgress?: (percent: number) => void,
+  transferId?: string,
 ): Promise<void> {
   const form = new FormData();
   form.append('dest', dest);
   form.append('relPaths', JSON.stringify(items.map((item) => item.relPath)));
+  if (transferId) form.append('transferId', transferId);
   for (const item of items) form.append('files', item.file);
   await postForm('/upload', form, onProgress);
+}
+
+/** The part of an upload that happens after the browser's own progress event
+ *  already reports 100% — relaying the file on to the actual remote target
+ *  (see transferProgress.ts's watchTransfer, which polls this). */
+export function transferProgress(id: string): Promise<{ total: number; transferred: number; done: boolean; error: string }> {
+  return request(`/transfer-progress/${encodeURIComponent(id)}`);
 }
 
 function postForm<T = unknown>(
@@ -303,9 +312,11 @@ export function dockerRemoveImage(image: string): Promise<{ output: string }> {
 export function dockerLoad(
   file: File,
   onProgress?: (percent: number) => void,
+  transferId?: string,
 ): Promise<{ images: string[]; output: string }> {
   const form = new FormData();
   form.append('image', file);
+  if (transferId) form.append('transferId', transferId);
   return postForm('/docker/load', form, onProgress);
 }
 
@@ -415,9 +426,14 @@ export function dotnetContext(): Promise<DotnetContext> {
   return request('/dotnet/context');
 }
 
-export function dotnetInspect(file: File, onProgress?: (percent: number) => void): Promise<DotnetInspectResult> {
+export function dotnetInspect(
+  file: File,
+  onProgress?: (percent: number) => void,
+  transferId?: string,
+): Promise<DotnetInspectResult> {
   const form = new FormData();
   form.append('app', file);
+  if (transferId) form.append('transferId', transferId);
   return postForm('/dotnet/inspect', form, onProgress);
 }
 

@@ -7,6 +7,7 @@ import { createReadStream, promises as fs } from 'node:fs';
 import posix from 'node:path/posix';
 import type { Express, NextFunction, Request, RequestHandler, Response } from 'express';
 import { exec, execWithInput, shellQuote, type ExecResult, type SshSession } from './ssh.js';
+import { advanceTransfer, finishTransfer, startTransfer } from './transfers.js';
 
 export interface SessionRequest extends Request {
   session?: SshSession;
@@ -967,18 +968,29 @@ export function registerOps(
       const file = req.file;
       need(file, 'no image file uploaded');
       const remote = `/tmp/ssher-image-${randomUUID()}.tar`;
+      // The relay to the actual remote server (often the slow part for a
+      // multi-GB image, after the browser→here leg already reported 100%) —
+      // see transfers.ts.
+      const transferId = str(req.body?.transferId);
+      if (transferId) startTransfer(transferId, file.size);
+      let sent = 0;
       try {
         await new Promise<void>((resolve, reject) => {
           const read = createReadStream(file.path);
           const write = session.sftp.createWriteStream(remote);
+          if (transferId) read.on('data', (chunk: string | Buffer) => advanceTransfer(transferId, (sent += chunk.length)));
           read.on('error', reject);
           write.on('error', reject);
           write.on('close', resolve);
           read.pipe(write);
         });
+        if (transferId) finishTransfer(transferId);
         const output = await runOrThrow(session, `docker load -i ${shellQuote(remote)} 2>&1`);
         const images = [...output.matchAll(/Loaded image(?: ID)?:\s*(\S+)/g)].map((m) => m[1]);
         res.json({ ok: true, images, output });
+      } catch (err) {
+        if (transferId) finishTransfer(transferId, (err as Error).message);
+        throw err;
       } finally {
         await fs.unlink(file.path).catch(() => {});
         await exec(session, `rm -f ${shellQuote(remote)}`).catch(() => {});

@@ -3,7 +3,9 @@ import { ref } from 'vue';
 import type { UploadItem } from '../api';
 import { itemsFromDrop, itemsFromInput } from '../dnd';
 
-defineProps<{ dest: string; busy: boolean; progress: number }>();
+withDefaults(defineProps<{ dest: string; busy: boolean; progress: number; stage?: string }>(), {
+  stage: 'Uploading…',
+});
 
 const emit = defineEmits<{
   close: [];
@@ -97,7 +99,7 @@ function onPick(event: Event) {
 
       <div v-if="busy" class="mt-4">
         <div class="mb-1.5 flex justify-between text-xs text-slate-400">
-          <span>Uploading…</span>
+          <span>{{ stage }}</span>
           <span class="tabular-nums">{{ progress }}%</span>
         </div>
         <div class="h-1.5 overflow-hidden rounded-full bg-slate-800">

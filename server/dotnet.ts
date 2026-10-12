@@ -29,6 +29,7 @@ import {
   type StepResult,
 } from './ops.js';
 import { readFile, shellQuote, type SshSession } from './ssh.js';
+import { advanceTransfer, finishTransfer, startTransfer } from './transfers.js';
 
 const STAGING_RE = /^\/tmp\/ssher-dotnet-[0-9a-f-]+$/;
 const UNIT_DIR = '/etc/systemd/system';
@@ -213,15 +214,20 @@ export function registerDotnet(
 
       const stagingDir = `/tmp/ssher-dotnet-${randomUUID()}`;
       const remoteZip = `${stagingDir}.zip`;
+      const transferId = str(req.body?.transferId);
+      if (transferId) startTransfer(transferId, file.size);
+      let sent = 0;
       try {
         await new Promise<void>((resolve, reject) => {
           const readStream = createReadStream(file.path);
           const writeStream = session.sftp.createWriteStream(remoteZip);
+          if (transferId) readStream.on('data', (chunk: string | Buffer) => advanceTransfer(transferId, (sent += chunk.length)));
           readStream.on('error', reject);
           writeStream.on('error', reject);
           writeStream.on('close', resolve);
           readStream.pipe(writeStream);
         });
+        if (transferId) finishTransfer(transferId);
         await runOrThrow(session, `mkdir -p ${shellQuote(stagingDir)} && unzip -o -q ${shellQuote(remoteZip)} -d ${shellQuote(stagingDir)}`);
 
         const mainDll = await findMainDll(session, stagingDir);
@@ -257,6 +263,9 @@ export function registerDotnet(
           installedRuntimes,
           compatible,
         });
+      } catch (err) {
+        if (transferId) finishTransfer(transferId, (err as Error).message);
+        throw err;
       } finally {
         await fs.unlink(file.path).catch(() => {});
         await run(session, `rm -f ${shellQuote(remoteZip)}`).catch(() => {});

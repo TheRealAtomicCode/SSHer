@@ -6,6 +6,7 @@ import { itemsFromDrop } from '../dnd';
 import { appFor, archiveFormat, cdCommand, copyToClipboard, normalizePathInput, typeKey, typeLabel } from '../files';
 import * as prefs from '../prefs';
 import { fail, notify } from '../toast';
+import { newTransferId, watchTransfer } from '../transferProgress';
 import type {
   ArchiveSupport,
   Clipboard,
@@ -60,6 +61,7 @@ const uploadOpen = ref(false);
 const uploadDest = ref('/');
 const uploading = ref(false);
 const progress = ref(0);
+const uploadStage = ref('Uploading…');
 const dragging = ref(false);
 
 const archiveSupport = ref<ArchiveSupport | null>(null);
@@ -523,11 +525,34 @@ async function doUpload(items: UploadItem[]) {
   if (!items.length) return;
   uploading.value = true;
   progress.value = 0;
+  uploadStage.value = 'Uploading…';
   const dest = uploadDest.value;
+  const transferId = newTransferId();
+  let watching = false;
+  let stopWatch = () => {};
   await run(async () => {
-    await api.upload(items, dest, (percent) => (progress.value = percent));
+    await api.upload(
+      items,
+      dest,
+      (percent) => {
+        progress.value = percent;
+        // The browser's own progress event only covers getting the file to
+        // this server — once that hits 100%, switch to polling the part that
+        // was previously invisible: relaying it on to the actual remote target.
+        if (percent >= 100 && !watching) {
+          watching = true;
+          uploadStage.value = 'Copying to the server…';
+          progress.value = 0;
+          stopWatch = watchTransfer(transferId, (state) => {
+            progress.value = state.total ? Math.round((state.transferred / state.total) * 100) : 100;
+          });
+        }
+      },
+      transferId,
+    );
     if (cwd.value === dest || dest.startsWith(cwd.value)) await load(cwd.value);
   }, `Uploaded ${items.length} file${items.length === 1 ? '' : 's'} to ${dest}`);
+  stopWatch();
   uploading.value = false;
   uploadOpen.value = false;
 }
@@ -838,6 +863,7 @@ onUnmounted(() => {
       v-model:dest="uploadDest"
       :busy="uploading"
       :progress="progress"
+      :stage="uploadStage"
       @close="uploadOpen = false"
       @upload="doUpload"
     />
@@ -878,7 +904,7 @@ onUnmounted(() => {
       class="fixed bottom-4 left-1/2 z-40 w-80 -translate-x-1/2 rounded-xl border border-slate-700 bg-slate-900 p-3 shadow-2xl"
     >
       <div class="mb-1.5 flex justify-between text-xs text-slate-400">
-        <span>Uploading…</span>
+        <span>{{ uploadStage }}</span>
         <span class="tabular-nums">{{ progress }}%</span>
       </div>
       <div class="h-1.5 overflow-hidden rounded-full bg-slate-800">

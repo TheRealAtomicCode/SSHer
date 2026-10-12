@@ -3,6 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue';
 import * as api from '../api';
 import { ApiError } from '../api';
 import { fail, notify } from '../toast';
+import { newTransferId, watchTransfer } from '../transferProgress';
 import type { ComposeInfo, ComposeOp, Container, DockerImage, RemoteFile, Session, StepResult } from '../types';
 import DeployWizard from './DeployWizard.vue';
 import LogViewer from './LogViewer.vue';
@@ -294,11 +295,33 @@ async function loadImageFile(file: File) {
   }
   loadProgress.value = 0;
   loadStage.value = `Uploading ${file.name} (${(file.size / 1e6).toFixed(0)} MB)`;
+  const transferId = newTransferId();
+  let watching = false;
+  let stopWatch = () => {};
   try {
-    const res = await api.dockerLoad(file, (p) => {
-      loadProgress.value = p;
-      if (p >= 100) loadStage.value = 'Copying to the server and running docker load…';
-    });
+    const res = await api.dockerLoad(
+      file,
+      (p) => {
+        loadProgress.value = p;
+        // The browser's own progress only covers getting the file to this
+        // server — for a multi-GB image the relay on to the actual remote
+        // target afterward is often the slower, previously invisible part.
+        if (p >= 100 && !watching) {
+          watching = true;
+          loadStage.value = 'Copying to the server…';
+          loadProgress.value = 0;
+          stopWatch = watchTransfer(transferId, (state) => {
+            if (state.done && !state.error) {
+              loadStage.value = 'Running docker load…';
+              loadProgress.value = 100;
+              return;
+            }
+            loadProgress.value = state.total ? Math.round((state.transferred / state.total) * 100) : 0;
+          });
+        }
+      },
+      transferId,
+    );
     if (!res.images.length) throw new Error(`docker load did not report an image:\n${res.output}`);
     notify(`Loaded ${res.images.join(', ')}`);
     await refresh();
@@ -309,6 +332,7 @@ async function loadImageFile(file: File) {
   } catch (err) {
     fail(err);
   } finally {
+    stopWatch();
     loadProgress.value = null;
   }
 }
