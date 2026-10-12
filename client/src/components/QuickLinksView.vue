@@ -2,8 +2,11 @@
 import { onMounted, ref } from 'vue';
 import * as api from '../api';
 import { QUICK_GROUPS, ALL_QUICK_PATHS, type QuickGroup, type QuickLink, type ServiceControl } from '../quicklinks';
+import { copyToClipboard } from '../files';
 import { fail, notify } from '../toast';
 import type { RemoteFile } from '../types';
+import PromptDialog from './PromptDialog.vue';
+import QuickLinkMenu from './QuickLinkMenu.vue';
 import TextEditor from './TextEditor.vue';
 
 const emit = defineEmits<{ openPath: [{ path: string; isDirectory: boolean }] }>();
@@ -13,6 +16,8 @@ const found = ref<Record<string, 'file' | 'dir'> | null>(null);
 const running = ref('');
 const output = ref<{ group: string; title: string; text: string; ok: boolean } | null>(null);
 const editing = ref<{ file: RemoteFile; group: QuickGroup } | null>(null);
+const menu = ref<{ x: number; y: number; link: QuickLink; group: QuickGroup } | null>(null);
+const renaming = ref<QuickLink | null>(null);
 
 // Full class strings — Tailwind cannot see classes assembled at runtime.
 const ACCENT: Record<string, { icon: string; ring: string; btn: string }> = {
@@ -95,6 +100,36 @@ function download(file: RemoteFile) {
   link.href = api.fileUrl(file.path);
   link.download = file.name;
   link.click();
+}
+
+function isDirLink(link: QuickLink): boolean {
+  return Boolean(link.dir || found.value?.[link.path] === 'dir');
+}
+
+function downloadLink(link: QuickLink) {
+  download({ name: link.path.split('/').pop()!, path: link.path, isDirectory: false, isSymlink: false, size: 0, mtime: 0, mode: 0 });
+}
+
+function openInLocation(link: QuickLink) {
+  emit('openPath', { path: link.path, isDirectory: isDirLink(link) });
+}
+
+async function copyPath(link: QuickLink) {
+  await copyToClipboard(link.path);
+  notify('Path copied');
+}
+
+async function renameLink(name: string) {
+  const link = renaming.value;
+  renaming.value = null;
+  if (!link) return;
+  try {
+    await api.rename(link.path, name);
+    notify(`Renamed to ${name} — this quick link still points at the old path, so it will now show as “not on this server”.`);
+    found.value = (await api.exists(ALL_QUICK_PATHS)).found;
+  } catch (err) {
+    fail(err);
+  }
 }
 
 onMounted(async () => {
@@ -192,6 +227,7 @@ onMounted(async () => {
               class="group flex w-full items-start gap-3 px-4 py-2.5 text-left transition hover:bg-slate-900"
               :class="found && !found[l.path] && 'opacity-40'"
               @click="open(g, l)"
+              @contextmenu.prevent="menu = { x: $event.clientX, y: $event.clientY, link: l, group: g }"
             >
               <v-icon
                 :name="l.dir ? 'fa-folder' : 'fa-file-code'"
@@ -227,6 +263,30 @@ onMounted(async () => {
       @close="editing = null"
       @saved="onSaved"
       @download="download"
+    />
+
+    <QuickLinkMenu
+      v-if="menu"
+      :x="menu.x"
+      :y="menu.y"
+      :link="menu.link"
+      :is-dir="isDirLink(menu.link)"
+      @close="menu = null"
+      @open="open(menu.group, menu.link)"
+      @rename="renaming = $event"
+      @open-in-location="openInLocation"
+      @copy-path="copyPath"
+      @download="downloadLink"
+    />
+
+    <PromptDialog
+      v-if="renaming"
+      title="Rename"
+      label="New name"
+      :initial="renaming.path.split('/').pop()!"
+      confirm-text="Rename"
+      @submit="renameLink"
+      @close="renaming = null"
     />
   </div>
 </template>
