@@ -68,6 +68,13 @@ const TILES: { view: View; title: string; text: string; icon: string; tone: stri
     icon: 'fa-database',
     tone: 'from-sky-500/20 text-sky-300 ring-sky-500/30',
   },
+  {
+    view: 'backups',
+    title: 'Backups',
+    text: 'pgBackRest: install, schedule backups to this server or another, and restore to any point in time.',
+    icon: 'fa-save',
+    tone: 'from-emerald-500/20 text-emerald-300 ring-emerald-500/30',
+  },
 ];
 </script>
 

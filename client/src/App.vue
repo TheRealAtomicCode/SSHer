@@ -9,6 +9,7 @@ import FileExplorer from './components/FileExplorer.vue';
 import HomeView from './components/HomeView.vue';
 import LogsView from './components/LogsView.vue';
 import NginxView from './components/NginxView.vue';
+import PgBackRestView from './components/PgBackRestView.vue';
 import PortsView from './components/PortsView.vue';
 import PostgresView from './components/PostgresView.vue';
 import ProcessesView from './components/ProcessesView.vue';
@@ -172,6 +173,7 @@ const NAV: { view: View; label: string; icon: string; sub?: boolean }[] = [
   { view: 'logs', label: 'Container logs', icon: 'fa-terminal', sub: true },
   { view: 'ports', label: 'Ports & Firewall', icon: 'fa-shield-alt' },
   { view: 'postgres', label: 'PostgreSQL', icon: 'fa-database' },
+  { view: 'backups', label: 'Backups', icon: 'fa-save', sub: true },
 ];
 </script>
 
@@ -364,6 +366,8 @@ const NAV: { view: View; label: string; icon: string; sub?: boolean }[] = [
         <PortsView v-if="view === 'ports'" :session="session" />
 
         <PostgresView v-if="view === 'postgres'" />
+
+        <PgBackRestView v-if="view === 'backups'" />
       </main>
     </div>
 

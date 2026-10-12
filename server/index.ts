@@ -10,6 +10,7 @@ import { registerDotnet } from './dotnet.js';
 import { registerNginx } from './nginx.js';
 import { execMaybeRootOrThrow, registerOps, str } from './ops.js';
 import { registerPermissions } from './permissions.js';
+import { registerPgBackRest } from './pgbackrest.js';
 import { registerPostgres } from './postgres.js';
 import { registerProcesses } from './processes.js';
 import { registerTerminal } from './terminal.js';
@@ -506,6 +507,7 @@ registerUsers(app, requireSession as express.RequestHandler, asyncRoute);
 registerPostgres(app, requireSession as express.RequestHandler, asyncRoute);
 registerPermissions(app, requireSession as express.RequestHandler, asyncRoute);
 registerProcesses(app, requireSession as express.RequestHandler, asyncRoute);
+registerPgBackRest(app, requireSession as express.RequestHandler, asyncRoute);
 
 app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
   console.error('[api]', err.message);

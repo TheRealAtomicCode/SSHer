@@ -55,7 +55,12 @@ function pgLiteral(value: string): string {
 
 // ------------------------------------------------------------------ exec helpers
 
-async function execAsPostgres(session: SshSession, command: string): Promise<{ code: number; stdout: string; stderr: string }> {
+/** Runs a command as the `postgres` OS user, $HOME correctly reset to its own
+ *  (not the connecting user's) — exported for pgbackrest.ts, which needs the
+ *  exact same thing for pgbackrest itself (it has to run as the user that
+ *  owns the data directory) and for generating postgres's own SSH keypair
+ *  when configuring a remote backup repo. */
+export async function execAsPostgres(session: SshSession, command: string): Promise<{ code: number; stdout: string; stderr: string }> {
   // -H resets $HOME to postgres's own home for the duration of the command —
   // without it, psql (run as postgres but with the connecting user's $HOME still
   // set) can fail in ways that don't fail the *process*: e.g. it can't write
@@ -72,7 +77,7 @@ async function execAsPostgres(session: SshSession, command: string): Promise<{ c
  *  default mode comes from the connecting user's umask, which isn't always
  *  world-readable, and a postgres that can't even open the file is just another
  *  way to end up with stderr text instead of the JSON runPgJson expects. */
-async function runPgSql(session: SshSession, sql: string, database = 'postgres'): Promise<string> {
+export async function runPgSql(session: SshSession, sql: string, database = 'postgres'): Promise<string> {
   const tmp = `/tmp/ssher-pg-${randomUUID()}.sql`;
   try {
     const write = await execWithInput(session, `tee ${shellQuote(tmp)} >/dev/null && chmod 644 ${shellQuote(tmp)}`, sql);
@@ -88,7 +93,7 @@ async function runPgSql(session: SshSession, sql: string, database = 'postgres')
   }
 }
 
-async function runPgJson<T>(session: SshSession, sql: string, database = 'postgres'): Promise<T> {
+export async function runPgJson<T>(session: SshSession, sql: string, database = 'postgres'): Promise<T> {
   const out = (await runPgSql(session, sql, database)).trim();
   if (!out) return [] as T;
   // The query's own output is always the last thing printed — anything stray

@@ -96,7 +96,8 @@ export type View =
   | 'dotnet'
   | 'logs'
   | 'ports'
-  | 'postgres';
+  | 'postgres'
+  | 'backups';
 
 // ------------------------------------------------------------------- docker
 
@@ -428,3 +429,37 @@ export interface ProcessInfo {
 }
 
 export type Signal = 'TERM' | 'KILL' | 'HUP' | 'INT';
+
+// ---------------------------------------------------------------- pgbackrest
+
+export interface PgBackRestContext {
+  installed: boolean;
+  configured: boolean;
+  stanza: string;
+  dataDir: string;
+  repo1: { path: string } | null;
+  repo2: { host: string; user: string; path: string } | null;
+  publicKey: string | null;
+}
+
+export interface PgBackRestConfigureSpec {
+  stanza: string;
+  repo1Path: string;
+  remote?: { host: string; port?: number; user: string; path: string };
+}
+
+export type PgBackRestBackupType = 'full' | 'diff' | 'incr';
+
+export interface PgBackRestBackupEntry {
+  label: string;
+  type: string;
+  startTime: number;
+  stopTime: number;
+  sizeBytes: number;
+}
+
+export interface PgBackRestBackupsResponse {
+  backups: PgBackRestBackupEntry[];
+  earliest: number | null;
+  latest: number | null;
+}

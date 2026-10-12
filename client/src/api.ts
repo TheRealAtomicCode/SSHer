@@ -20,6 +20,10 @@ import type {
   LocalApp,
   NginxSite,
   NginxSiteSpec,
+  PgBackRestBackupsResponse,
+  PgBackRestBackupType,
+  PgBackRestConfigureSpec,
+  PgBackRestContext,
   PortsState,
   PostgresContext,
   PostgresDatabase,
@@ -613,6 +617,36 @@ export function postgresGrant(spec: {
   includeSequences?: boolean;
 }): Promise<void> {
   return request('/postgres/grant', { method: 'POST', body: json(spec) });
+}
+
+// ---------------------------------------------------------------- pgbackrest
+
+export function pgbackrestContext(): Promise<PgBackRestContext> {
+  return request('/pgbackrest/context');
+}
+
+export function pgbackrestInstall(): Promise<{ log: StepResult[] }> {
+  return request('/pgbackrest/install', { method: 'POST' });
+}
+
+export function pgbackrestSshKey(): Promise<{ publicKey: string }> {
+  return request('/pgbackrest/ssh-key', { method: 'POST' });
+}
+
+export function pgbackrestConfigure(spec: PgBackRestConfigureSpec): Promise<{ log: StepResult[] }> {
+  return request('/pgbackrest/configure', { method: 'POST', body: json(spec) });
+}
+
+export function pgbackrestBackup(type: PgBackRestBackupType, repo?: 1 | 2): Promise<{ ok: true; output: string }> {
+  return request('/pgbackrest/backup', { method: 'POST', body: json({ type, repo }) });
+}
+
+export function pgbackrestBackups(): Promise<PgBackRestBackupsResponse> {
+  return request('/pgbackrest/backups');
+}
+
+export function pgbackrestRestore(targetTime: string, repo?: 1 | 2): Promise<{ log: StepResult[] }> {
+  return request('/pgbackrest/restore', { method: 'POST', body: json({ targetTime, repo, confirm: true }) });
 }
 
 // -------------------------------------------------------------- activity log
