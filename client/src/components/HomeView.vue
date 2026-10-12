@@ -20,6 +20,13 @@ const TILES: { view: View; title: string; text: string; icon: string; tone: stri
     tone: 'from-emerald-500/20 text-emerald-300 ring-emerald-500/30',
   },
   {
+    view: 'nginx',
+    title: 'Nginx',
+    text: 'Sites — enable, disable, edit — and add one by drag & drop, or for an app this page just noticed.',
+    icon: 'fa-globe',
+    tone: 'from-emerald-500/20 text-emerald-300 ring-emerald-500/30',
+  },
+  {
     view: 'docker',
     title: 'Docker',
     text: 'Containers, logs, compose configs, updates — and deploy a new image by drag & drop.',

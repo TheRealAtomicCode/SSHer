@@ -6,6 +6,7 @@ import DockerView from './components/DockerView.vue';
 import FileExplorer from './components/FileExplorer.vue';
 import HomeView from './components/HomeView.vue';
 import LogsView from './components/LogsView.vue';
+import NginxView from './components/NginxView.vue';
 import PortsView from './components/PortsView.vue';
 import QuickLinksView from './components/QuickLinksView.vue';
 import ShortcutDialog from './components/ShortcutDialog.vue';
@@ -148,6 +149,7 @@ const NAV: { view: View; label: string; icon: string; sub?: boolean }[] = [
   { view: 'files', label: 'File Explorer', icon: 'fa-folder-open' },
   { view: 'shortcuts', label: 'Shortcuts', icon: 'fa-star', sub: true },
   { view: 'links', label: 'Quick Links', icon: 'fa-link' },
+  { view: 'nginx', label: 'Nginx', icon: 'fa-globe' },
   { view: 'docker', label: 'Docker', icon: 'fa-docker' },
   { view: 'logs', label: 'Container logs', icon: 'fa-terminal', sub: true },
   { view: 'ports', label: 'Ports & Firewall', icon: 'fa-shield-alt' },
@@ -293,6 +295,8 @@ const NAV: { view: View; label: string; icon: string; sub?: boolean }[] = [
         />
 
         <QuickLinksView v-if="view === 'links'" @open-path="openShortcut" />
+
+        <NginxView v-if="view === 'nginx'" @open-path="openShortcut" />
 
         <DockerView
           v-if="view === 'docker'"

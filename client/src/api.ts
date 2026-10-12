@@ -10,6 +10,9 @@ import type {
   DockerImage,
   ImageInfo,
   Listing,
+  LocalApp,
+  NginxSite,
+  NginxSiteSpec,
   PortsState,
   Session,
   StepResult,
@@ -342,6 +345,40 @@ export function serviceAction(service: ServiceName, action: string): Promise<{ o
 
 export function exists(paths: string[]): Promise<{ found: Record<string, 'file' | 'dir'> }> {
   return request('/exists', { method: 'POST', body: json({ paths }) });
+}
+
+// -------------------------------------------------------------------- nginx
+
+export function nginxSites(): Promise<{ sites: NginxSite[] }> {
+  return request('/nginx/sites');
+}
+
+export function localApps(): Promise<{ apps: LocalApp[] }> {
+  return request('/local-apps');
+}
+
+export function nginxUploadSite(
+  file: File,
+): Promise<{ suggestedName: string; domain: string; target: string; maxBody: string; raw: string }> {
+  const form = new FormData();
+  form.append('filename', file.name);
+  form.append('site', file);
+  return postForm('/nginx/upload-site', form);
+}
+
+export function nginxAddSite(spec: NginxSiteSpec): Promise<{ log: StepResult[]; site: NginxSite }> {
+  return request('/nginx/sites', { method: 'POST', body: json(spec) });
+}
+
+export function nginxSetEnabled(name: string, enabled: boolean): Promise<{ output: string }> {
+  return request(`/nginx/sites/${encodeURIComponent(name)}/enabled`, {
+    method: 'POST',
+    body: json({ enabled }),
+  });
+}
+
+export function nginxDeleteSite(name: string): Promise<{ output: string }> {
+  return request(`/nginx/sites/${encodeURIComponent(name)}/delete`, { method: 'POST' });
 }
 
 // ------------------------------------------------------------------ archive

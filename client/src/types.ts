@@ -84,7 +84,7 @@ export interface Shortcut {
   createdAt: number;
 }
 
-export type View = 'home' | 'files' | 'shortcuts' | 'links' | 'docker' | 'logs' | 'ports';
+export type View = 'home' | 'files' | 'shortcuts' | 'links' | 'nginx' | 'docker' | 'dotnet' | 'logs' | 'ports';
 
 // ------------------------------------------------------------------- docker
 
@@ -215,4 +215,32 @@ export type CompressFormat = 'zip' | 'tar.gz' | 'tar.bz2' | 'tar.xz';
 export interface ArchiveSupport {
   compress: Record<CompressFormat, boolean>;
   extract: Record<'zip' | 'tar' | 'tar.gz' | 'tar.bz2' | 'tar.xz' | '7z' | 'rar', boolean>;
+}
+
+// --------------------------------------------------------------------- nginx
+
+export interface NginxSite {
+  name: string;
+  path: string;
+  enabled: boolean;
+  /** Only a site SSHer wrote itself gets structured edit fields re-offered. */
+  managed: boolean;
+  domains: string[];
+  target: string;
+  maxBody: string;
+}
+
+export interface NginxSiteSpec {
+  name: string;
+  domain: string;
+  target: string;
+  maxBody: string;
+  overwrite: boolean;
+}
+
+export interface LocalApp {
+  name: string;
+  kind: 'docker' | 'dotnet';
+  /** `host:port` — pre-fills the add-site wizard's target field. */
+  target: string;
 }

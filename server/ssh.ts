@@ -186,6 +186,19 @@ export function rename(session: SshSession, from: string, to: string): Promise<v
   });
 }
 
+/** Buffers a whole remote file over SFTP — for config files and manifests small
+ *  enough to read in one go (site configs, a .runtimeconfig.json), not arbitrary
+ *  downloads (those stream, see index.ts's `/api/download`). */
+export function readFile(session: SshSession, path: string): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    const stream = session.sftp.createReadStream(path);
+    stream.on('data', (chunk: Buffer) => chunks.push(chunk));
+    stream.on('error', reject);
+    stream.on('end', () => resolve(Buffer.concat(chunks)));
+  });
+}
+
 const idleSweep = setInterval(() => {
   const cutoff = Date.now() - IDLE_TIMEOUT_MS;
   for (const session of sessions.values()) {
