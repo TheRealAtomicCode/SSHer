@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx tsc *)",
+      "Bash(echo \"EXIT:$?\")",
+      "Bash(docker version *)",
+      "Bash(where docker *)",
+      "Bash(node v2.mjs C:/Users/qader/AppData/Local/Temp/claude/c--Users-qader-Desktop-Projects-SSH-webapp/41cfced5-caf0-4193-9df4-46b3ed192624/scratchpad/shots)",
+      "Bash(node v4.mjs)",
+      "Bash(taskkill //FI \"IMAGENAME eq node.exe\" //F)",
+      "Bash(grep -vE '^\\\\s*$')",
+      "Bash(grep -viE '^\\\\s*$')"
+    ]
+  }
+}

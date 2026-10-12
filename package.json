@@ -1,0 +1,39 @@
+{
+  "name": "ssh_webapp",
+  "version": "1.0.0",
+  "description": "Web based SSH/SFTP file browser",
+  "license": "ISC",
+  "author": "",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "start": "concurrently -n api,web -c cyan,magenta -k \"npm run dev:api\" \"npm run dev:client\"",
+    "dev": "npm start",
+    "dev:all": "npm start",
+    "dev:api": "tsx watch server/index.ts",
+    "dev:client": "npm --prefix client run dev",
+    "build": "tsc -p tsconfig.json && npm --prefix client run build",
+    "serve": "node dist/index.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit && npm --prefix client run typecheck",
+    "postinstall": "npm --prefix client install",
+    "docker:build": "docker build -f server/Dockerfile -t ssher/api:latest . && docker build -t ssher/web:latest client",
+    "docker:save": "docker save -o ssher-api.tar ssher/api:latest && docker save -o ssher-web.tar ssher/web:latest",
+    "docker:images": "npm run docker:build && npm run docker:save"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "multer": "^2.0.0",
+    "ssh2": "^1.16.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/multer": "^1.4.12",
+    "@types/node": "^22.10.2",
+    "@types/ssh2": "^1.15.1",
+    "concurrently": "^9.1.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
