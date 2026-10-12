@@ -724,7 +724,13 @@ const btn = 'rounded-md p-1.5 text-slate-400 transition hover:bg-slate-800 hover
 
         <!-- Logs -->
         <div v-else-if="detailTab === 'logs'" class="flex h-full flex-col">
-          <LogViewer :key="selected.name" :container="selected.name" compact class="min-h-0 flex-1" />
+          <LogViewer
+            :key="selected.name"
+            :container="selected.name"
+            compact
+            class="min-h-0 flex-1"
+            @open-path="emit('openPath', $event)"
+          />
           <button class="mt-2 self-start text-[11px] text-sky-400 hover:text-sky-300" @click="emit('openLogs', selected.name)">
             Open in the Logs page →
           </button>

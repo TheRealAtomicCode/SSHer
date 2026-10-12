@@ -69,15 +69,23 @@ async function runPgSql(session: SshSession, sql: string, database = 'postgres')
 async function runPgJson<T>(session: SshSession, sql: string, database = 'postgres'): Promise<T> {
   const out = (await runPgSql(session, sql, database)).trim();
   if (!out) return [] as T;
-  try {
-    return JSON.parse(out) as T;
-  } catch {
-    // Exit code 0 but not JSON — almost always psql or sudo printing something
-    // (a warning, a notice) ahead of the real output rather than a genuine
-    // failure. Show it verbatim instead of letting JSON.parse's own cryptic
-    // "Unexpected token" reach the user.
-    throw new Error(`psql didn't return the expected JSON — here is what it printed:\n${out.slice(0, 500)}`);
+  // The query's own output is always the last thing printed — anything stray
+  // ahead of it (a one-time notice from sudo or psql, say) lands on an earlier
+  // line, so try the whole output first, then just its last line, before
+  // giving up. Keeps exit-0-but-not-pure-JSON from being treated as a hard
+  // failure when the real result is in there regardless.
+  const lines = out.split('\n');
+  for (const candidate of [out, lines.at(-1)?.trim() ?? '']) {
+    if (!candidate) continue;
+    try {
+      return JSON.parse(candidate) as T;
+    } catch {
+      // try the next candidate
+    }
   }
+  // Exit code 0 but still not JSON anywhere in it — show it verbatim instead of
+  // letting JSON.parse's own cryptic "Unexpected token" reach the user.
+  throw new Error(`psql didn't return the expected JSON — here is what it printed:\n${out.slice(0, 1000)}`);
 }
 
 function validIdent(name: string, label: string): string {

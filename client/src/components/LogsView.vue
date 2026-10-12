@@ -6,6 +6,7 @@ import type { Container } from '../types';
 import LogViewer from './LogViewer.vue';
 
 const props = defineProps<{ initial?: string }>();
+const emit = defineEmits<{ openPath: [{ path: string; isDirectory: boolean }] }>();
 
 const containers = ref<Container[]>([]);
 const loading = ref(true);
@@ -101,7 +102,12 @@ onMounted(refresh);
           Turn on <b>Problems</b> to see only those lines.
         </div>
 
-        <LogViewer :key="current.name" :container="current.name" class="min-h-0 flex-1" />
+        <LogViewer
+          :key="current.name"
+          :container="current.name"
+          class="min-h-0 flex-1"
+          @open-path="emit('openPath', $event)"
+        />
       </template>
       <p v-else-if="!loading" class="m-auto text-sm text-slate-500">Pick a container on the left.</p>
     </section>

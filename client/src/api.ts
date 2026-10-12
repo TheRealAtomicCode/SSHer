@@ -249,6 +249,12 @@ export function dockerLogs(id: string, tail = 300): Promise<{ logs: string }> {
   return request(`/docker/logs?id=${encodeURIComponent(id)}&tail=${tail}`);
 }
 
+/** The real on-disk file `docker logs` reads from — empty when the log driver
+ *  isn't file-backed (journald, syslog, none). */
+export function dockerLogPath(id: string): Promise<{ path: string }> {
+  return request(`/docker/log-path?id=${encodeURIComponent(id)}`);
+}
+
 export function dockerInspect(id: string): Promise<{ inspect: Record<string, unknown> }> {
   return request(`/docker/inspect?id=${encodeURIComponent(id)}`);
 }

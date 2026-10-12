@@ -14,10 +14,16 @@ import QuickLinksView from './components/QuickLinksView.vue';
 import ShortcutDialog from './components/ShortcutDialog.vue';
 import ShortcutsView from './components/ShortcutsView.vue';
 import UsersView from './components/UsersView.vue';
+import { copyToClipboard } from './files';
 import * as prefs from './prefs';
 import { sudoMode, toggleSudoMode } from './sudoMode';
-import { fail, notify, sessionState, toasts } from './toast';
+import { dismiss, fail, notify, sessionState, toasts } from './toast';
 import type { Credentials, Session, Shortcut, View } from './types';
+
+async function copyToastMessage(message: string) {
+  await copyToClipboard(message);
+  notify('Copied');
+}
 
 const session = ref<Session | null>(null);
 const connecting = ref(false);
@@ -328,7 +334,7 @@ const NAV: { view: View; label: string; icon: string; sub?: boolean }[] = [
           @open-logs="(name: string) => { logsFor = name; view = 'logs'; }"
         />
 
-        <LogsView v-if="view === 'logs'" :initial="logsFor" />
+        <LogsView v-if="view === 'logs'" :initial="logsFor" @open-path="openShortcut" />
 
         <PortsView v-if="view === 'ports'" :session="session" />
 
@@ -348,7 +354,7 @@ const NAV: { view: View; label: string; icon: string; sub?: boolean }[] = [
       <div
         v-for="toast in toasts"
         :key="toast.id"
-        class="flex max-w-sm items-start gap-2 rounded-lg border px-3.5 py-2.5 text-sm whitespace-pre-line shadow-xl"
+        class="pointer-events-auto flex max-w-sm items-start gap-2 rounded-lg border px-3.5 py-2.5 text-sm whitespace-pre-line shadow-xl"
         :class="
           toast.kind === 'ok'
             ? 'border-emerald-800 bg-emerald-950 text-emerald-200'
@@ -360,7 +366,19 @@ const NAV: { view: View; label: string; icon: string; sub?: boolean }[] = [
           scale="0.8"
           class="mt-0.5 shrink-0"
         />
-        <span class="break-words">{{ toast.message }}</span>
+        <span class="min-w-0 flex-1 break-words">{{ toast.message }}</span>
+        <template v-if="toast.kind === 'error'">
+          <button
+            class="mt-0.5 shrink-0 text-red-300/70 hover:text-white"
+            title="Copy this message"
+            @click="copyToastMessage(toast.message)"
+          >
+            <v-icon name="fa-copy" scale="0.7" />
+          </button>
+          <button class="mt-0.5 shrink-0 text-red-300/70 hover:text-white" title="Dismiss" @click="dismiss(toast.id)">
+            <v-icon name="fa-times" scale="0.7" />
+          </button>
+        </template>
       </div>
     </div>
   </div>

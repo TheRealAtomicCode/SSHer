@@ -5,6 +5,7 @@ import { copyToClipboard } from '../files';
 import { fail, notify } from '../toast';
 
 const props = defineProps<{ container: string; compact?: boolean }>();
+const emit = defineEmits<{ openPath: [{ path: string; isDirectory: boolean }] }>();
 
 const raw = ref('');
 const loading = ref(false);
@@ -14,6 +15,7 @@ const query = ref('');
 const problemsOnly = ref(false);
 const wrap = ref(true);
 const box = ref<HTMLElement | null>(null);
+const logPath = ref('');
 let timer: ReturnType<typeof setInterval> | undefined;
 
 // What a line's severity looks like across nginx, .NET, Node and most other servers.
@@ -76,10 +78,28 @@ async function copyLogs() {
   notify(`Copied ${visible.value.length} lines`);
 }
 
+/** Everything currently fetched (not just what's visible after filtering), as a
+ *  file — for grepping locally, attaching to a ticket, opening in a real editor. */
+function downloadLog() {
+  const blob = new Blob([raw.value], { type: 'text/plain' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `${props.container}.log`;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function openLogFile() {
+  if (logPath.value) emit('openPath', { path: logPath.value, isDirectory: false });
+}
+
 watch(
   () => props.container,
   () => {
     raw.value = '';
+    logPath.value = '';
+    api.dockerLogPath(props.container).then((r) => (logPath.value = r.path)).catch(() => {});
     load();
   },
   { immediate: true },
@@ -130,6 +150,17 @@ const ctl = 'rounded-md border border-slate-700 px-2 py-1 text-[11px] text-slate
       </div>
       <button :class="ctl" title="Copy the visible lines" @click="copyLogs">
         <v-icon name="fa-copy" scale="0.6" />
+      </button>
+      <button :class="ctl" title="Download everything fetched so far as a .log file" @click="downloadLog">
+        <v-icon name="fa-download" scale="0.6" />
+      </button>
+      <button
+        v-if="logPath"
+        :class="ctl"
+        :title="`Open ${logPath} in the File Explorer`"
+        @click="openLogFile"
+      >
+        <v-icon name="fa-folder-open" scale="0.6" />
       </button>
     </div>
 

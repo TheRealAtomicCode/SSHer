@@ -714,6 +714,22 @@ export function registerOps(
     }),
   );
 
+  /** The real file backing `docker logs`, so it can be opened in the File Explorer
+   *  (or just reached over SSH directly) — only meaningful for the default
+   *  json-file/local log drivers; empty for journald/syslog/none, which don't write
+   *  one on disk, handled as "not available" rather than guessed at. */
+  app.get(
+    '/api/docker/log-path',
+    requireSession,
+    route(async (req, res) => {
+      const id = str(req.query.id);
+      need(RE.id.test(id), 'invalid container id');
+      const result = await run(req.session!, `docker inspect --format '{{.LogPath}}' ${shellQuote(id)} 2>&1`);
+      const path = result.code === 0 ? result.stdout.trim() : '';
+      res.json({ path });
+    }),
+  );
+
   app.get(
     '/api/docker/inspect',
     requireSession,
