@@ -88,6 +88,7 @@ import {
   FaUserLock,
   FaUserShield,
   FaUsers,
+  FaWindowMaximize,
   FaWrench,
   SiDotnet,
 } from 'oh-vue-icons/icons';
@@ -181,6 +182,7 @@ addIcons(
   FaUserLock,
   FaUserShield,
   FaUsers,
+  FaWindowMaximize,
   FaWrench,
   SiDotnet,
 );

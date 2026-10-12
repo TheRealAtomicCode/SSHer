@@ -11,6 +11,7 @@ import { registerNginx } from './nginx.js';
 import { execMaybeRootOrThrow, registerOps } from './ops.js';
 import { registerPermissions } from './permissions.js';
 import { registerPostgres } from './postgres.js';
+import { registerTerminal } from './terminal.js';
 import { registerUsers } from './users.js';
 import {
   connect,
@@ -489,6 +490,8 @@ app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
   res.status(500).json({ error: err.message || 'Internal error' });
 });
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`SSH web API listening on http://localhost:${PORT}`);
 });
+
+registerTerminal(server, (key) => !ACCESS_KEY || keyMatches(key));

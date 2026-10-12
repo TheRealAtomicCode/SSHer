@@ -598,3 +598,14 @@ export function postgresGrant(spec: {
 export function commandLog(): Promise<{ entries: CommandLogEntry[] }> {
   return request('/command-log');
 }
+
+// ----------------------------------------------------------------- terminal
+
+/** A real interactive shell — WebSocket, not fetch(), so credentials travel the
+ *  same "query string, not a header" way fileUrl()'s downloads already do. */
+export function terminalUrl(cols: number, rows: number): string {
+  const params = new URLSearchParams({ sid: sessionId ?? '', cols: String(cols), rows: String(rows) });
+  if (accessKey) params.set('key', accessKey);
+  const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+  return `${scheme}://${location.host}/api/terminal?${params.toString()}`;
+}

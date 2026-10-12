@@ -194,6 +194,19 @@ export function execChannel(session: SshSession, command: string): Promise<Clien
   });
 }
 
+/** A real PTY-backed interactive shell (`terminal.ts`'s WebSocket bridge) rather
+ *  than a one-shot command — not instrumented into the command log the way
+ *  exec()/execWithInput() are, since a live shell's traffic isn't a discrete
+ *  "command" the way a single exec() call is. */
+export function openShell(session: SshSession, opts: { cols: number; rows: number }): Promise<ClientChannel> {
+  return new Promise((resolve, reject) => {
+    session.conn.shell({ term: 'xterm-256color', cols: opts.cols, rows: opts.rows }, (err, stream) => {
+      if (err) return reject(err);
+      resolve(stream);
+    });
+  });
+}
+
 /** Runs a command and rejects with the remote stderr when it exits non-zero. */
 export async function execOrThrow(session: SshSession, command: string): Promise<string> {
   const result = await exec(session, command);

@@ -14,6 +14,7 @@ import PostgresView from './components/PostgresView.vue';
 import QuickLinksView from './components/QuickLinksView.vue';
 import ShortcutDialog from './components/ShortcutDialog.vue';
 import ShortcutsView from './components/ShortcutsView.vue';
+import TerminalDock from './components/TerminalDock.vue';
 import UsersView from './components/UsersView.vue';
 import { copyToClipboard } from './files';
 import * as prefs from './prefs';
@@ -34,6 +35,7 @@ const view = ref<View>('home');
 const logsFor = ref('');
 const isFullscreen = ref(false);
 const activityOpen = ref(false);
+const terminalOpen = ref(false);
 
 const explorer = ref<InstanceType<typeof FileExplorer> | null>(null);
 
@@ -191,6 +193,14 @@ const NAV: { view: View; label: string; icon: string; sub?: boolean }[] = [
         @click="activityOpen = !activityOpen"
       >
         <v-icon name="fa-terminal" scale="0.7" /> Activity
+      </button>
+      <button
+        class="flex shrink-0 items-center gap-1.5 border-l border-slate-800 bg-slate-900 px-3 text-xs font-medium text-slate-400 transition hover:bg-slate-800 hover:text-white"
+        :class="terminalOpen && 'bg-slate-800 text-emerald-300'"
+        title="Two real shells on the server, side by side"
+        @click="terminalOpen = !terminalOpen"
+      >
+        <v-icon name="fa-window-maximize" scale="0.7" /> Terminal
       </button>
     </div>
 
@@ -361,6 +371,8 @@ const NAV: { view: View; label: string; icon: string; sub?: boolean }[] = [
     />
 
     <ActivityLogPanel :open="activityOpen" @close="activityOpen = false" />
+
+    <TerminalDock :open="terminalOpen" @close="terminalOpen = false" />
 
     <!-- Bottom-right toasts. -->
     <div class="pointer-events-none fixed right-4 bottom-4 z-[60] space-y-2">
