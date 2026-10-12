@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import * as api from './api';
+import ActivityLogPanel from './components/ActivityLogPanel.vue';
 import ConnectPanel from './components/ConnectPanel.vue';
 import DockerView from './components/DockerView.vue';
 import DotNetView from './components/DotNetView.vue';
@@ -32,6 +33,7 @@ const view = ref<View>('home');
 /** Which container the Logs page opens on, when jumping there from the Docker page. */
 const logsFor = ref('');
 const isFullscreen = ref(false);
+const activityOpen = ref(false);
 
 const explorer = ref<InstanceType<typeof FileExplorer> | null>(null);
 
@@ -171,17 +173,26 @@ const NAV: { view: View; label: string; icon: string; sub?: boolean }[] = [
 
 <template>
   <div class="flex h-full flex-col bg-slate-950">
-    <!-- Sudo mode: fixed at the very top, visible from every page. -->
-    <button
-      v-if="session"
-      class="flex shrink-0 items-center justify-center gap-1.5 py-1 text-xs font-medium transition"
-      :class="sudoMode.enabled ? 'bg-red-600 text-white hover:bg-red-500' : 'bg-slate-900 text-slate-500 hover:text-slate-300'"
-      :title="sudoMode.enabled ? 'Click to turn sudo mode off' : 'Click to run File Explorer actions as root'"
-      @click="toggleSudoMode"
-    >
-      <v-icon :name="sudoMode.enabled ? 'fa-unlock-alt' : 'fa-lock'" scale="0.7" />
-      {{ sudoMode.enabled ? 'Sudo mode is ON — File Explorer actions run as root' : 'Sudo mode is off' }}
-    </button>
+    <!-- Top strip: sudo mode + activity log, fixed at the very top, visible from every page. -->
+    <div v-if="session" class="flex h-7 shrink-0 items-stretch">
+      <button
+        class="flex flex-1 items-center justify-center gap-1.5 text-xs font-medium transition"
+        :class="sudoMode.enabled ? 'bg-red-600 text-white hover:bg-red-500' : 'bg-slate-900 text-slate-500 hover:text-slate-300'"
+        :title="sudoMode.enabled ? 'Click to turn sudo mode off' : 'Click to run File Explorer actions as root'"
+        @click="toggleSudoMode"
+      >
+        <v-icon :name="sudoMode.enabled ? 'fa-unlock-alt' : 'fa-lock'" scale="0.7" />
+        {{ sudoMode.enabled ? 'Sudo mode is ON — File Explorer actions run as root' : 'Sudo mode is off' }}
+      </button>
+      <button
+        class="flex shrink-0 items-center gap-1.5 border-l border-slate-800 bg-slate-900 px-3 text-xs font-medium text-slate-400 transition hover:bg-slate-800 hover:text-white"
+        :class="activityOpen && 'bg-slate-800 text-emerald-300'"
+        title="See every shell command any button here has run this session"
+        @click="activityOpen = !activityOpen"
+      >
+        <v-icon name="fa-terminal" scale="0.7" /> Activity
+      </button>
+    </div>
 
     <div v-if="access === 'needed'" class="flex min-h-full items-center justify-center p-6">
       <form
@@ -348,6 +359,8 @@ const NAV: { view: View; label: string; icon: string; sub?: boolean }[] = [
       @save="saveShortcut"
       @close="shortcutDraft = null"
     />
+
+    <ActivityLogPanel :open="activityOpen" @close="activityOpen = false" />
 
     <!-- Bottom-right toasts. -->
     <div class="pointer-events-none fixed right-4 bottom-4 z-[60] space-y-2">

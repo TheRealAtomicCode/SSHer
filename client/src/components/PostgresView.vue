@@ -3,7 +3,44 @@ import { computed, onMounted, reactive, ref, watch } from 'vue';
 import * as api from '../api';
 import { sudoMode } from '../sudoMode';
 import { fail, notify } from '../toast';
-import type { PostgresContext, PostgresDatabase, PostgresRole, PostgresTablePrivilege, PostgresTablePrivileges } from '../types';
+import type {
+  PostgresContext,
+  PostgresDatabase,
+  PostgresDatabasePrivilege,
+  PostgresDatabasePrivileges,
+  PostgresRole,
+  PostgresSchemaPrivilege,
+  PostgresSchemaPrivileges,
+  PostgresTablePrivilege,
+  PostgresTablePrivileges,
+} from '../types';
+
+const ROLE_ATTRS = ['canlogin', 'superuser', 'createdb', 'createrole', 'replication', 'bypassrls'] as const;
+const ROLE_ATTR_LABEL: Record<(typeof ROLE_ATTRS)[number], string> = {
+  canlogin: 'Can log in',
+  superuser: 'Superuser',
+  createdb: 'Createdb',
+  createrole: 'Createrole',
+  replication: 'Replication',
+  bypassrls: 'Bypass RLS',
+};
+
+const TABLE_PRIVS = ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER'] as const;
+const TABLE_PRIV_ABBR: Record<(typeof TABLE_PRIVS)[number], string> = {
+  SELECT: 'Se', INSERT: 'In', UPDATE: 'Up', DELETE: 'De', TRUNCATE: 'Tn', REFERENCES: 'Rf', TRIGGER: 'Tg',
+};
+type TableKey = 'select' | 'insert' | 'update' | 'delete' | 'truncate' | 'references' | 'trigger';
+
+const DB_PRIVS: { privilege: PostgresDatabasePrivilege; key: keyof PostgresDatabasePrivileges; label: string }[] = [
+  { privilege: 'CONNECT', key: 'connect', label: 'Can CONNECT' },
+  { privilege: 'CREATE', key: 'create', label: 'Can CREATE schemas' },
+  { privilege: 'TEMPORARY', key: 'temporary', label: 'Can create TEMP tables' },
+];
+
+const SCHEMA_PRIVS: { privilege: PostgresSchemaPrivilege; key: keyof PostgresSchemaPrivileges; label: string }[] = [
+  { privilege: 'USAGE', key: 'usage', label: 'USAGE (can see this schema at all)' },
+  { privilege: 'CREATE', key: 'create', label: 'CREATE (can add new tables here)' },
+];
 
 const loading = ref(true);
 const context = ref<PostgresContext | null>(null);
@@ -15,7 +52,8 @@ const tab = ref<'role' | 'access'>('role');
 const busy = ref(false);
 
 const newRoleOpen = ref(false);
-const newRole = reactive({ name: '', login: true, password: '', superuser: false, createdb: false, createrole: false });
+const NEW_ROLE_DEFAULTS = { name: '', login: true, password: '', superuser: false, createdb: false, createrole: false, replication: false, bypassrls: false };
+const newRole = reactive({ ...NEW_ROLE_DEFAULTS });
 
 const newPassword = ref('');
 
@@ -23,8 +61,11 @@ const accessDb = ref('');
 const accessSchemas = ref<string[]>([]);
 const accessSchema = ref('');
 const accessTables = ref<PostgresTablePrivileges[]>([]);
-const accessConnect = ref(false);
+const accessDbPrivs = ref<PostgresDatabasePrivileges>({ connect: false, create: false, temporary: false });
+const accessSchemaPrivs = ref<PostgresSchemaPrivileges>({ usage: false, create: false });
 const accessLoading = ref(false);
+const grantSequencesToo = ref(true);
+const ownerBusy = ref<string | null>(null);
 
 const usable = computed(() => Boolean(context.value?.installed && context.value?.reachable));
 
@@ -64,7 +105,7 @@ async function createRole() {
     await api.postgresCreateRole({ ...newRole });
     notify(`Created role ${newRole.name}`);
     newRoleOpen.value = false;
-    Object.assign(newRole, { name: '', login: true, password: '', superuser: false, createdb: false, createrole: false });
+    Object.assign(newRole, NEW_ROLE_DEFAULTS);
     await refresh();
   } catch (err) {
     fail(err);
@@ -102,8 +143,9 @@ async function setPassword(role: PostgresRole) {
   }
 }
 
-async function toggleAttribute(role: PostgresRole, key: 'superuser' | 'createdb' | 'createrole' | 'canlogin') {
+async function toggleAttribute(role: PostgresRole, key: (typeof ROLE_ATTRS)[number]) {
   if (key === 'superuser' && !role.superuser && !confirm(`Make ${role.name} a superuser?\n\nThis bypasses every permission check in the database.`)) return;
+  if (key === 'bypassrls' && !role.bypassrls && !confirm(`Let ${role.name} bypass row-level security?\n\nAny RLS policy on any table stops applying to it.`)) return;
   busy.value = true;
   try {
     await api.postgresSetAttributes(role.name, { [key]: !role[key] });
@@ -129,7 +171,8 @@ async function loadTables() {
   try {
     const res = await api.postgresTables(accessDb.value, accessSchema.value, selected.value.name);
     accessTables.value = res.tables;
-    accessConnect.value = res.connect;
+    accessDbPrivs.value = res.database;
+    accessSchemaPrivs.value = res.schema;
   } catch (err) {
     fail(err);
   } finally {
@@ -139,13 +182,25 @@ async function loadTables() {
 
 watch(accessSchema, loadTables);
 
-async function toggleConnect() {
+async function toggleDatabasePrivilege(privilege: PostgresDatabasePrivilege, key: keyof PostgresDatabasePrivileges) {
   if (!selected.value || !accessDb.value) return;
-  const grant = !accessConnect.value;
+  const grant = !accessDbPrivs.value[key];
   try {
-    await api.postgresGrant({ db: accessDb.value, role: selected.value.name, kind: 'database', grant });
-    accessConnect.value = grant;
-    notify(`${grant ? 'Granted' : 'Revoked'} CONNECT on ${accessDb.value}`);
+    await api.postgresGrant({ db: accessDb.value, role: selected.value.name, kind: 'database', privilege, grant });
+    accessDbPrivs.value = { ...accessDbPrivs.value, [key]: grant };
+    notify(`${grant ? 'Granted' : 'Revoked'} ${privilege} on ${accessDb.value}`);
+  } catch (err) {
+    fail(err);
+  }
+}
+
+async function toggleSchemaPrivilege(privilege: PostgresSchemaPrivilege, key: keyof PostgresSchemaPrivileges) {
+  if (!selected.value || !accessDb.value || !accessSchema.value) return;
+  const grant = !accessSchemaPrivs.value[key];
+  try {
+    await api.postgresGrant({ db: accessDb.value, role: selected.value.name, kind: 'schema-privilege', schema: accessSchema.value, privilege, grant });
+    accessSchemaPrivs.value = { ...accessSchemaPrivs.value, [key]: grant };
+    notify(`${grant ? 'Granted' : 'Revoked'} ${privilege} on schema ${accessSchema.value}`);
   } catch (err) {
     fail(err);
   }
@@ -153,7 +208,7 @@ async function toggleConnect() {
 
 async function toggleTablePrivilege(table: PostgresTablePrivileges, privilege: PostgresTablePrivilege) {
   if (!selected.value || !accessDb.value || !accessSchema.value) return;
-  const key = privilege.toLowerCase() as 'select' | 'insert' | 'update' | 'delete';
+  const key = privilege.toLowerCase() as TableKey;
   const grant = !table[key];
   try {
     await api.postgresGrant({ db: accessDb.value, role: selected.value.name, kind: 'table', schema: accessSchema.value, table: table.name, privilege, grant });
@@ -165,13 +220,45 @@ async function toggleTablePrivilege(table: PostgresTablePrivileges, privilege: P
 
 async function grantWholeSchema(includeFuture: boolean) {
   if (!selected.value || !accessDb.value || !accessSchema.value) return;
-  if (!confirm(`Grant SELECT/INSERT/UPDATE/DELETE on every table in "${accessSchema.value}" to ${selected.value.name}${includeFuture ? ', including tables created later' : ''}?`)) return;
+  const seq = grantSequencesToo.value;
+  if (
+    !confirm(
+      `Grant SELECT/INSERT/UPDATE/DELETE/TRUNCATE/REFERENCES/TRIGGER on every table in "${accessSchema.value}" to ${selected.value.name}` +
+        `${includeFuture ? ', including tables created later' : ''}${seq ? ', plus USAGE on its sequences (needed for serial/identity columns)' : ''}?`,
+    )
+  )
+    return;
   try {
-    await api.postgresGrant({ db: accessDb.value, role: selected.value.name, kind: 'schema', schema: accessSchema.value, grant: true, includeFuture });
+    await api.postgresGrant({
+      db: accessDb.value,
+      role: selected.value.name,
+      kind: 'schema',
+      schema: accessSchema.value,
+      grant: true,
+      includeFuture,
+      includeSequences: seq,
+    });
     notify('Granted');
     await loadTables();
   } catch (err) {
     fail(err);
+  }
+}
+
+/** Ownership, not a grant — the actual mechanism behind "can this role ALTER or
+ *  DROP the table", since Postgres has no privilege for either of those. */
+async function changeOwner(table: PostgresTablePrivileges, newOwner: string) {
+  if (!accessDb.value || !accessSchema.value || !newOwner || newOwner === table.owner) return;
+  if (!confirm(`Make "${newOwner}" the owner of ${accessSchema.value}.${table.name}?\n\nOwnership — not a grant — is what lets a role ALTER or DROP this table.`)) return;
+  ownerBusy.value = table.name;
+  try {
+    await api.postgresGrant({ db: accessDb.value, role: newOwner, kind: 'owner', schema: accessSchema.value, table: table.name });
+    table.owner = newOwner;
+    notify(`${table.name} is now owned by ${newOwner}`);
+  } catch (err) {
+    fail(err);
+  } finally {
+    ownerBusy.value = null;
   }
 }
 
@@ -266,9 +353,9 @@ const label = 'mb-1.5 block text-xs font-medium text-slate-400';
         <!-- Role tab -->
         <div v-if="tab === 'role'" class="space-y-4">
           <div class="flex flex-wrap gap-2">
-            <label v-for="attr in (['canlogin','superuser','createdb','createrole'] as const)" :key="attr" class="flex items-center gap-1.5 rounded-lg border border-slate-800 px-2.5 py-1.5 text-xs text-slate-300">
+            <label v-for="attr in ROLE_ATTRS" :key="attr" class="flex items-center gap-1.5 rounded-lg border border-slate-800 px-2.5 py-1.5 text-xs text-slate-300">
               <input type="checkbox" :checked="selected[attr]" class="accent-sky-500" :disabled="busy" @change="toggleAttribute(selected, attr)" />
-              {{ attr === 'canlogin' ? 'Can log in' : attr }}
+              {{ ROLE_ATTR_LABEL[attr] }}
             </label>
           </div>
 
@@ -296,10 +383,13 @@ const label = 'mb-1.5 block text-xs font-medium text-slate-400';
           </div>
 
           <template v-if="accessDb">
-            <label class="flex items-center gap-2 text-xs text-slate-300">
-              <input type="checkbox" :checked="accessConnect" class="accent-sky-500" @change="toggleConnect" />
-              Can CONNECT to {{ accessDb }}
-            </label>
+            <div class="space-y-1">
+              <p class="text-[11px] font-medium tracking-wide text-slate-500 uppercase">Database: {{ accessDb }}</p>
+              <label v-for="p in DB_PRIVS" :key="p.privilege" class="flex items-center gap-2 text-xs text-slate-300">
+                <input type="checkbox" :checked="accessDbPrivs[p.key]" class="accent-sky-500" @change="toggleDatabasePrivilege(p.privilege, p.key)" />
+                {{ p.label }}
+              </label>
+            </div>
 
             <div>
               <label :class="label">Schema</label>
@@ -310,33 +400,63 @@ const label = 'mb-1.5 block text-xs font-medium text-slate-400';
             </div>
 
             <template v-if="accessSchema">
-              <div class="flex gap-2">
+              <div class="space-y-1">
+                <p class="text-[11px] font-medium tracking-wide text-slate-500 uppercase">Schema: {{ accessSchema }}</p>
+                <label v-for="p in SCHEMA_PRIVS" :key="p.privilege" class="flex items-center gap-2 text-xs text-slate-300">
+                  <input type="checkbox" :checked="accessSchemaPrivs[p.key]" class="accent-sky-500" @change="toggleSchemaPrivilege(p.privilege, p.key)" />
+                  {{ p.label }}
+                </label>
+                <p v-if="!accessSchemaPrivs.usage" class="text-[11px] text-amber-300">
+                  Without USAGE, the table grants below don't actually let this role do anything here.
+                </p>
+              </div>
+
+              <div class="flex flex-wrap items-center gap-2 border-t border-slate-800 pt-3">
                 <button :class="btn" @click="grantWholeSchema(false)">Grant on whole schema</button>
                 <button :class="btn" @click="grantWholeSchema(true)">+ future tables too</button>
+                <label class="flex items-center gap-1.5 text-xs text-slate-400">
+                  <input v-model="grantSequencesToo" type="checkbox" class="accent-sky-500" /> + sequences
+                </label>
               </div>
 
               <div v-if="accessLoading" class="py-6 text-center"><v-icon name="fa-spinner" class="animate-spin text-sky-400" /></div>
-              <table v-else-if="accessTables.length" class="w-full text-xs">
-                <thead class="text-slate-500">
-                  <tr>
-                    <th class="py-1 text-left font-medium">Table</th>
-                    <th v-for="p in (['SELECT','INSERT','UPDATE','DELETE'] as const)" :key="p" class="w-12 font-medium">{{ p[0] }}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr v-for="table in accessTables" :key="table.name" class="border-t border-slate-800/70">
-                    <td class="py-1.5 font-mono text-slate-200">{{ table.name }}</td>
-                    <td v-for="p in (['SELECT','INSERT','UPDATE','DELETE'] as const)" :key="p" class="text-center">
-                      <input
-                        type="checkbox"
-                        class="accent-sky-500"
-                        :checked="table[p.toLowerCase() as 'select'|'insert'|'update'|'delete']"
-                        @change="toggleTablePrivilege(table, p)"
-                      />
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
+              <div v-else-if="accessTables.length" class="overflow-x-auto">
+                <table class="w-full text-xs">
+                  <thead class="text-slate-500">
+                    <tr>
+                      <th class="py-1 text-left font-medium">Table</th>
+                      <th class="text-left font-medium">Owner</th>
+                      <th v-for="p in TABLE_PRIVS" :key="p" class="w-9 font-medium" :title="p">{{ TABLE_PRIV_ABBR[p] }}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="table in accessTables" :key="table.name" class="border-t border-slate-800/70">
+                      <td class="py-1.5 font-mono text-slate-200">{{ table.name }}</td>
+                      <td class="py-1.5">
+                        <select
+                          :value="table.owner"
+                          :disabled="ownerBusy === table.name"
+                          class="rounded border border-slate-800 bg-slate-950 px-1 py-0.5 font-mono text-[11px] text-slate-300 focus:border-sky-500 focus:outline-none"
+                          @change="changeOwner(table, ($event.target as HTMLSelectElement).value)"
+                        >
+                          <option v-for="r in roles" :key="r.name" :value="r.name">{{ r.name }}</option>
+                        </select>
+                      </td>
+                      <td v-for="p in TABLE_PRIVS" :key="p" class="text-center">
+                        <input
+                          type="checkbox"
+                          class="accent-sky-500"
+                          :checked="table[p.toLowerCase() as TableKey]"
+                          @change="toggleTablePrivilege(table, p)"
+                        />
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+                <p class="mt-2 text-[11px] text-slate-500">
+                  Owner controls ALTER/DROP — Postgres has no grantable privilege for those, only ownership.
+                </p>
+              </div>
               <p v-else class="py-6 text-center text-slate-500">No tables in this schema.</p>
             </template>
           </template>
@@ -361,6 +481,8 @@ const label = 'mb-1.5 block text-xs font-medium text-slate-400';
           <label class="flex items-center gap-1.5"><input v-model="newRole.superuser" type="checkbox" class="accent-sky-500" /> Superuser</label>
           <label class="flex items-center gap-1.5"><input v-model="newRole.createdb" type="checkbox" class="accent-sky-500" /> Createdb</label>
           <label class="flex items-center gap-1.5"><input v-model="newRole.createrole" type="checkbox" class="accent-sky-500" /> Createrole</label>
+          <label class="flex items-center gap-1.5"><input v-model="newRole.replication" type="checkbox" class="accent-sky-500" /> Replication</label>
+          <label class="flex items-center gap-1.5"><input v-model="newRole.bypassrls" type="checkbox" class="accent-sky-500" /> Bypass RLS</label>
         </div>
         <div class="flex justify-end gap-2">
           <button class="rounded-lg px-3 py-2 text-sm text-slate-400 hover:bg-slate-800" @click="newRoleOpen = false">Cancel</button>

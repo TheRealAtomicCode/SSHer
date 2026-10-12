@@ -2,6 +2,16 @@ import { randomUUID } from 'node:crypto';
 import { Client } from 'ssh2';
 import type { ClientChannel, FileEntry, SFTPWrapper, Stats } from 'ssh2';
 
+export interface CommandLogEntry {
+  id: number;
+  /** Epoch ms. */
+  time: number;
+  command: string;
+  /** `null` means it never got an exit code — the exec request itself failed. */
+  code: number | null;
+  durationMs: number;
+}
+
 export interface SshSession {
   id: string;
   host: string;
@@ -11,6 +21,12 @@ export interface SshSession {
   conn: Client;
   sftp: SFTPWrapper;
   lastUsed: number;
+  /** Every shell command run for this session, oldest first, capped at
+   *  COMMAND_LOG_LIMIT — what the "activity" panel shows. Command text only,
+   *  never output: a command that writes a password (chpasswd, `ALTER ROLE …
+   *  PASSWORD`) always pipes it over stdin rather than putting it on the command
+   *  line, specifically so this log can never end up holding one. */
+  commandLog: CommandLogEntry[];
 }
 
 export interface ConnectOptions {
@@ -23,7 +39,14 @@ export interface ConnectOptions {
 }
 
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+const COMMAND_LOG_LIMIT = 300;
 const sessions = new Map<string, SshSession>();
+let nextCommandLogId = 0;
+
+function recordCommand(session: SshSession, command: string, code: number | null, durationMs: number): void {
+  session.commandLog.push({ id: nextCommandLogId++, time: Date.now(), command, code, durationMs });
+  if (session.commandLog.length > COMMAND_LOG_LIMIT) session.commandLog.shift();
+}
 
 /** Wraps a value in single quotes for safe use as a single POSIX shell argument. */
 export function shellQuote(value: string): string {
@@ -58,6 +81,7 @@ export function connect(opts: ConnectOptions): Promise<SshSession> {
             conn,
             sftp,
             lastUsed: Date.now(),
+            commandLog: [],
           };
           sessions.set(session.id, session);
           conn.on('close', () => sessions.delete(session.id));
@@ -101,9 +125,13 @@ export interface ExecResult {
 }
 
 export function exec(session: SshSession, command: string): Promise<ExecResult> {
+  const started = Date.now();
   return new Promise((resolve, reject) => {
     session.conn.exec(command, (err, stream) => {
-      if (err) return reject(err);
+      if (err) {
+        recordCommand(session, command, null, Date.now() - started);
+        return reject(err);
+      }
       let stdout = '';
       let stderr = '';
       stream.on('data', (chunk: Buffer) => {
@@ -113,6 +141,7 @@ export function exec(session: SshSession, command: string): Promise<ExecResult> 
         stderr += chunk.toString('utf8');
       });
       stream.on('close', (code: number | null) => {
+        recordCommand(session, command, code ?? 0, Date.now() - started);
         resolve({ code: code ?? 0, stdout, stderr });
       });
     });
@@ -125,9 +154,13 @@ export function execWithInput(
   command: string,
   input: string,
 ): Promise<ExecResult> {
+  const started = Date.now();
   return new Promise((resolve, reject) => {
     session.conn.exec(command, (err, stream) => {
-      if (err) return reject(err);
+      if (err) {
+        recordCommand(session, command, null, Date.now() - started);
+        return reject(err);
+      }
       let stdout = '';
       let stderr = '';
       stream.on('data', (chunk: Buffer) => {
@@ -137,6 +170,7 @@ export function execWithInput(
         stderr += chunk.toString('utf8');
       });
       stream.on('close', (code: number | null) => {
+        recordCommand(session, command, code ?? 0, Date.now() - started);
         resolve({ code: code ?? 0, stdout, stderr });
       });
       stream.end(input);
@@ -146,10 +180,17 @@ export function execWithInput(
 
 /** Hands back the raw channel for `command` instead of buffering it, so its stdout can
  *  be `.pipe()`d straight to an HTTP response — used to stream an on-the-fly zip without
- *  ever writing it to disk, the same way `/api/download` pipes an SFTP read stream. */
+ *  ever writing it to disk, the same way `/api/download` pipes an SFTP read stream.
+ *  Logged at kick-off, not completion — the caller owns the channel from here, so the
+ *  final exit code isn't available where this function could still record it. */
 export function execChannel(session: SshSession, command: string): Promise<ClientChannel> {
+  const started = Date.now();
   return new Promise((resolve, reject) => {
-    session.conn.exec(command, (err, stream) => (err ? reject(err) : resolve(stream)));
+    session.conn.exec(command, (err, stream) => {
+      recordCommand(session, command, null, Date.now() - started);
+      if (err) return reject(err);
+      resolve(stream);
+    });
   });
 }
 

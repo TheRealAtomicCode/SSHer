@@ -4,6 +4,7 @@ import type {
   ComposeInfo,
   ComposeOp,
   CompressFormat,
+  CommandLogEntry,
   Container,
   Credentials,
   DeploySpec,
@@ -22,7 +23,11 @@ import type {
   PortsState,
   PostgresContext,
   PostgresDatabase,
+  PostgresDatabasePrivilege,
+  PostgresDatabasePrivileges,
   PostgresRole,
+  PostgresSchemaPrivilege,
+  PostgresSchemaPrivileges,
   PostgresTablePrivilege,
   PostgresTablePrivileges,
   Session,
@@ -530,6 +535,8 @@ export function postgresCreateRole(spec: {
   superuser?: boolean;
   createdb?: boolean;
   createrole?: boolean;
+  replication?: boolean;
+  bypassrls?: boolean;
 }): Promise<void> {
   return request('/postgres/roles', { method: 'POST', body: json(spec) });
 }
@@ -544,7 +551,14 @@ export function postgresSetPassword(name: string, password: string): Promise<voi
 
 export function postgresSetAttributes(
   name: string,
-  attrs: { superuser?: boolean; createdb?: boolean; createrole?: boolean; canlogin?: boolean },
+  attrs: {
+    superuser?: boolean;
+    createdb?: boolean;
+    createrole?: boolean;
+    canlogin?: boolean;
+    replication?: boolean;
+    bypassrls?: boolean;
+  },
 ): Promise<void> {
   return request(`/postgres/roles/${encodeURIComponent(name)}/attributes`, { method: 'POST', body: json(attrs) });
 }
@@ -561,19 +575,26 @@ export function postgresTables(
   db: string,
   schema: string,
   role: string,
-): Promise<{ tables: PostgresTablePrivileges[]; connect: boolean }> {
+): Promise<{ tables: PostgresTablePrivileges[]; database: PostgresDatabasePrivileges; schema: PostgresSchemaPrivileges }> {
   return request(`/postgres/databases/${encodeURIComponent(db)}/schemas/${encodeURIComponent(schema)}/tables?role=${encodeURIComponent(role)}`);
 }
 
 export function postgresGrant(spec: {
   db: string;
   role: string;
-  kind: 'database' | 'table' | 'schema';
+  kind: 'database' | 'schema-privilege' | 'table' | 'schema' | 'owner';
   schema?: string;
   table?: string;
-  privilege?: PostgresTablePrivilege;
-  grant: boolean;
+  privilege?: PostgresTablePrivilege | PostgresDatabasePrivilege | PostgresSchemaPrivilege;
+  grant?: boolean;
   includeFuture?: boolean;
+  includeSequences?: boolean;
 }): Promise<void> {
   return request('/postgres/grant', { method: 'POST', body: json(spec) });
+}
+
+// -------------------------------------------------------------- activity log
+
+export function commandLog(): Promise<{ entries: CommandLogEntry[] }> {
+  return request('/command-log');
 }

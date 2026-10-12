@@ -363,6 +363,8 @@ export interface PostgresRole {
   createdb: boolean;
   createrole: boolean;
   canlogin: boolean;
+  replication: boolean;
+  bypassrls: boolean;
   validuntil: string | null;
   memberof: string[];
 }
@@ -372,12 +374,41 @@ export interface PostgresDatabase {
   owner: string;
 }
 
+/** The real grantable table privileges — there is no ALTER/DROP here because
+ *  Postgres doesn't have one; that's governed by `owner` instead. */
 export interface PostgresTablePrivileges {
   name: string;
+  owner: string;
   select: boolean;
   insert: boolean;
   update: boolean;
   delete: boolean;
+  truncate: boolean;
+  references: boolean;
+  trigger: boolean;
 }
 
-export type PostgresTablePrivilege = 'SELECT' | 'INSERT' | 'UPDATE' | 'DELETE';
+export type PostgresTablePrivilege = 'SELECT' | 'INSERT' | 'UPDATE' | 'DELETE' | 'TRUNCATE' | 'REFERENCES' | 'TRIGGER';
+export type PostgresDatabasePrivilege = 'CONNECT' | 'CREATE' | 'TEMPORARY';
+export type PostgresSchemaPrivilege = 'USAGE' | 'CREATE';
+
+export interface PostgresDatabasePrivileges {
+  connect: boolean;
+  create: boolean;
+  temporary: boolean;
+}
+
+export interface PostgresSchemaPrivileges {
+  usage: boolean;
+  create: boolean;
+}
+
+// -------------------------------------------------------------- activity log
+
+export interface CommandLogEntry {
+  id: number;
+  time: number;
+  command: string;
+  code: number | null;
+  durationMs: number;
+}

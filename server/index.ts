@@ -176,6 +176,12 @@ app.get('/api/session', requireSession, (req: SessionRequest, res: Response) => 
   });
 });
 
+/** Every shell command run for this session so far — what runs behind any button
+ *  here, regardless of which page it was clicked on. */
+app.get('/api/command-log', requireSession, (req: SessionRequest, res: Response) => {
+  res.json({ entries: req.session!.commandLog });
+});
+
 app.get(
   '/api/list',
   requireSession,

@@ -15,8 +15,30 @@ import { badRequestRoute, need, run, str, type AsyncRoute, type SessionRequest }
 import { exec, execWithInput, shellQuote, type SshSession } from './ssh.js';
 
 const PG_IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
-const PRIVILEGES = ['SELECT', 'INSERT', 'UPDATE', 'DELETE'] as const;
-type Privilege = (typeof PRIVILEGES)[number];
+
+// The real grantable Postgres table privileges — there is no "ALTER"/"DROP" in
+// this list because Postgres doesn't have one: altering or dropping a table is
+// gated by ownership, not a GRANT, which is why there's a separate "owner" grant
+// kind below rather than a fictitious privilege.
+const TABLE_PRIVILEGES = ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER'] as const;
+type TablePrivilege = (typeof TABLE_PRIVILEGES)[number];
+
+const DATABASE_PRIVILEGES = ['CONNECT', 'CREATE', 'TEMPORARY'] as const;
+type DatabasePrivilege = (typeof DATABASE_PRIVILEGES)[number];
+
+// USAGE is the one people forget: without it a role can't even "see" the schema,
+// so table-level grants inside it quietly do nothing.
+const SCHEMA_PRIVILEGES = ['USAGE', 'CREATE'] as const;
+type SchemaPrivilege = (typeof SCHEMA_PRIVILEGES)[number];
+
+const ROLE_ATTRIBUTES: Record<string, string> = {
+  canlogin: 'LOGIN',
+  superuser: 'SUPERUSER',
+  createdb: 'CREATEDB',
+  createrole: 'CREATEROLE',
+  replication: 'REPLICATION',
+  bypassrls: 'BYPASSRLS',
+};
 
 /** Double-quoted SQL identifier — the only values ever interpolated this way are
  *  names the server itself already validated against `PG_IDENT_RE`, or ones a
@@ -129,6 +151,7 @@ export function registerPostgres(app: Express, requireSession: import('express')
         `SELECT COALESCE(json_agg(row_to_json(r)), '[]'::json) FROM (
            SELECT rolname AS name, rolsuper AS superuser, rolcreatedb AS createdb,
                   rolcreaterole AS createrole, rolcanlogin AS canlogin,
+                  rolreplication AS replication, rolbypassrls AS bypassrls,
                   rolvaliduntil AS validuntil,
                   COALESCE((SELECT array_agg(b.rolname ORDER BY b.rolname)
                             FROM pg_auth_members m JOIN pg_roles b ON b.oid = m.roleid
@@ -148,9 +171,9 @@ export function registerPostgres(app: Express, requireSession: import('express')
     route(async (req, res) => {
       const name = validIdent(str(req.body?.name), 'role name');
       const parts = [`CREATE ROLE ${pgIdent(name)}`, req.body?.login ? 'LOGIN' : 'NOLOGIN'];
-      if (req.body?.superuser) parts.push('SUPERUSER');
-      if (req.body?.createdb) parts.push('CREATEDB');
-      if (req.body?.createrole) parts.push('CREATEROLE');
+      for (const [key, word] of Object.entries(ROLE_ATTRIBUTES)) {
+        if (key !== 'canlogin' && req.body?.[key]) parts.push(word);
+      }
       const password = str(req.body?.password);
       if (password) parts.push(`PASSWORD ${pgLiteral(password)}`);
       await runPgSql(req.session!, `${parts.join(' ')};`);
@@ -185,9 +208,8 @@ export function registerPostgres(app: Express, requireSession: import('express')
     requireSession,
     route(async (req, res) => {
       const name = validIdent(str(req.params.name), 'role name');
-      const toggles: Record<string, string> = { superuser: 'SUPERUSER', createdb: 'CREATEDB', createrole: 'CREATEROLE', canlogin: 'LOGIN' };
       const sets: string[] = [];
-      for (const [key, word] of Object.entries(toggles)) {
+      for (const [key, word] of Object.entries(ROLE_ATTRIBUTES)) {
         if (typeof req.body?.[key] === 'boolean') sets.push(req.body[key] ? word : `NO${word}`);
       }
       need(sets.length, 'No attributes given');
@@ -232,27 +254,39 @@ export function registerPostgres(app: Express, requireSession: import('express')
     '/api/postgres/databases/:db/schemas/:schema/tables',
     requireSession,
     route(async (req, res) => {
+      const session = req.session!;
       const db = validIdent(str(req.params.db), 'database name');
       const schema = validIdent(str(req.params.schema), 'schema name');
       const role = validIdent(str(req.query.role), 'role name');
-      const priv = (p: Privilege) =>
-        `has_table_privilege(${pgLiteral(role)}, format('%I.%I', table_schema, table_name), '${p}') AS "${p.toLowerCase()}"`;
+
+      const tablePriv = (p: TablePrivilege) =>
+        `has_table_privilege(${pgLiteral(role)}, format('%I.%I', schemaname, tablename), '${p}') AS "${p.toLowerCase()}"`;
       const tables = await runPgJson(
-        req.session!,
+        session,
         `SELECT COALESCE(json_agg(row_to_json(t)), '[]'::json) FROM (
-           SELECT table_name AS name, ${PRIVILEGES.map(priv).join(', ')}
-           FROM information_schema.tables
-           WHERE table_schema = ${pgLiteral(schema)} AND table_type = 'BASE TABLE'
-           ORDER BY table_name
+           SELECT tablename AS name, tableowner AS owner, ${TABLE_PRIVILEGES.map(tablePriv).join(', ')}
+           FROM pg_catalog.pg_tables
+           WHERE schemaname = ${pgLiteral(schema)}
+           ORDER BY tablename
          ) t;`,
         db,
       );
-      const connect = await runPgJson<boolean>(
-        req.session!,
-        `SELECT to_json(has_database_privilege(${pgLiteral(role)}, ${pgLiteral(db)}, 'CONNECT'));`,
+
+      const dbPriv = (p: DatabasePrivilege) => `'${p.toLowerCase()}', has_database_privilege(${pgLiteral(role)}, ${pgLiteral(db)}, '${p}')`;
+      const database = await runPgJson<Record<string, boolean>>(
+        session,
+        `SELECT json_build_object(${DATABASE_PRIVILEGES.map(dbPriv).join(', ')});`,
         db,
       );
-      res.json({ tables, connect });
+
+      const schemaPriv = (p: SchemaPrivilege) => `'${p.toLowerCase()}', has_schema_privilege(${pgLiteral(role)}, ${pgLiteral(schema)}, '${p}')`;
+      const schemaPrivs = await runPgJson<Record<string, boolean>>(
+        session,
+        `SELECT json_build_object(${SCHEMA_PRIVILEGES.map(schemaPriv).join(', ')});`,
+        db,
+      );
+
+      res.json({ tables, database, schema: schemaPrivs });
     }),
   );
 
@@ -269,7 +303,18 @@ export function registerPostgres(app: Express, requireSession: import('express')
       const prep = grant ? 'TO' : 'FROM';
 
       if (kind === 'database') {
-        await runPgSql(session, `${verb} CONNECT ON DATABASE ${pgIdent(db)} ${prep} ${pgIdent(role)};`);
+        const privilege = str(req.body?.privilege).toUpperCase();
+        need((DATABASE_PRIVILEGES as readonly string[]).includes(privilege), 'invalid privilege');
+        await runPgSql(session, `${verb} ${privilege} ON DATABASE ${pgIdent(db)} ${prep} ${pgIdent(role)};`);
+        res.json({ ok: true });
+        return;
+      }
+
+      if (kind === 'schema-privilege') {
+        const schema = validIdent(str(req.body?.schema), 'schema name');
+        const privilege = str(req.body?.privilege).toUpperCase();
+        need((SCHEMA_PRIVILEGES as readonly string[]).includes(privilege), 'invalid privilege');
+        await runPgSql(session, `${verb} ${privilege} ON SCHEMA ${pgIdent(schema)} ${prep} ${pgIdent(role)};`, db);
         res.json({ ok: true });
         return;
       }
@@ -278,19 +323,42 @@ export function registerPostgres(app: Express, requireSession: import('express')
         const schema = validIdent(str(req.body?.schema), 'schema name');
         const table = validIdent(str(req.body?.table), 'table name');
         const privilege = str(req.body?.privilege).toUpperCase();
-        need((PRIVILEGES as readonly string[]).includes(privilege), 'invalid privilege');
+        need((TABLE_PRIVILEGES as readonly string[]).includes(privilege), 'invalid privilege');
         await runPgSql(session, `${verb} ${privilege} ON TABLE ${pgIdent(schema)}.${pgIdent(table)} ${prep} ${pgIdent(role)};`, db);
+        res.json({ ok: true });
+        return;
+      }
+
+      /** Ownership, not a grant — this is what actually governs ALTER/DROP TABLE,
+       *  which Postgres has no GRANT privilege for at all. */
+      if (kind === 'owner') {
+        const schema = validIdent(str(req.body?.schema), 'schema name');
+        const table = validIdent(str(req.body?.table), 'table name');
+        await runPgSql(session, `ALTER TABLE ${pgIdent(schema)}.${pgIdent(table)} OWNER TO ${pgIdent(role)};`, db);
         res.json({ ok: true });
         return;
       }
 
       if (kind === 'schema') {
         const schema = validIdent(str(req.body?.schema), 'schema name');
-        let sql = `${verb} ${PRIVILEGES.join(', ')} ON ALL TABLES IN SCHEMA ${pgIdent(schema)} ${prep} ${pgIdent(role)};`;
+        const statements = [`${verb} ${TABLE_PRIVILEGES.join(', ')} ON ALL TABLES IN SCHEMA ${pgIdent(schema)} ${prep} ${pgIdent(role)};`];
         if (req.body?.includeFuture) {
-          sql += `\nALTER DEFAULT PRIVILEGES IN SCHEMA ${pgIdent(schema)} ${verb} ${PRIVILEGES.join(', ')} ON TABLES ${prep} ${pgIdent(role)};`;
+          statements.push(
+            `ALTER DEFAULT PRIVILEGES IN SCHEMA ${pgIdent(schema)} ${verb} ${TABLE_PRIVILEGES.join(', ')} ON TABLES ${prep} ${pgIdent(role)};`,
+          );
         }
-        await runPgSql(session, sql, db);
+        // The common gotcha: INSERT on a table with a serial/identity column
+        // also needs USAGE (and usually SELECT, for currval()) on its sequence —
+        // granted separately because Postgres has no "cascade to sequences" option.
+        if (req.body?.includeSequences) {
+          statements.push(`${verb} SELECT, USAGE ON ALL SEQUENCES IN SCHEMA ${pgIdent(schema)} ${prep} ${pgIdent(role)};`);
+          if (req.body?.includeFuture) {
+            statements.push(
+              `ALTER DEFAULT PRIVILEGES IN SCHEMA ${pgIdent(schema)} ${verb} SELECT, USAGE ON SEQUENCES ${prep} ${pgIdent(role)};`,
+            );
+          }
+        }
+        await runPgSql(session, statements.join('\n'), db);
         res.json({ ok: true });
         return;
       }
