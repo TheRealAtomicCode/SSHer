@@ -34,16 +34,26 @@ function pgLiteral(value: string): string {
 // ------------------------------------------------------------------ exec helpers
 
 async function execAsPostgres(session: SshSession, command: string): Promise<{ code: number; stdout: string; stderr: string }> {
-  return exec(session, session.username === 'postgres' ? command : `sudo -n -u postgres ${command}`);
+  // -H resets $HOME to postgres's own home for the duration of the command —
+  // without it, psql (run as postgres but with the connecting user's $HOME still
+  // set) can fail in ways that don't fail the *process*: e.g. it can't write
+  // there, prints a warning to stderr, and — since stderr is merged into stdout
+  // below so real psql errors aren't lost — that warning text ends up ahead of
+  // the actual JSON, which breaks runPgJson's JSON.parse despite psql itself
+  // having exited 0.
+  return exec(session, session.username === 'postgres' ? command : `sudo -n -H -u postgres ${command}`);
 }
 
-/** Writes `sql` to a world-readable scratch file as the connected (unprivileged)
- *  user — no root needed just to create a file under /tmp — then runs it as
- *  `postgres`, which only needs read access, not ownership. */
+/** Writes `sql` to a scratch file as the connected (unprivileged) user — no root
+ *  needed just to create a file under /tmp — then runs it as `postgres`, which
+ *  only needs read access, not ownership. The explicit chmod matters: `tee`'s
+ *  default mode comes from the connecting user's umask, which isn't always
+ *  world-readable, and a postgres that can't even open the file is just another
+ *  way to end up with stderr text instead of the JSON runPgJson expects. */
 async function runPgSql(session: SshSession, sql: string, database = 'postgres'): Promise<string> {
   const tmp = `/tmp/ssher-pg-${randomUUID()}.sql`;
   try {
-    const write = await execWithInput(session, `tee ${shellQuote(tmp)} >/dev/null`, sql);
+    const write = await execWithInput(session, `tee ${shellQuote(tmp)} >/dev/null && chmod 644 ${shellQuote(tmp)}`, sql);
     if (write.code !== 0) throw new Error(write.stderr.trim() || `could not stage the query`);
     const result = await execAsPostgres(
       session,
@@ -58,7 +68,16 @@ async function runPgSql(session: SshSession, sql: string, database = 'postgres')
 
 async function runPgJson<T>(session: SshSession, sql: string, database = 'postgres'): Promise<T> {
   const out = (await runPgSql(session, sql, database)).trim();
-  return (out ? JSON.parse(out) : []) as T;
+  if (!out) return [] as T;
+  try {
+    return JSON.parse(out) as T;
+  } catch {
+    // Exit code 0 but not JSON — almost always psql or sudo printing something
+    // (a warning, a notice) ahead of the real output rather than a genuine
+    // failure. Show it verbatim instead of letting JSON.parse's own cryptic
+    // "Unexpected token" reach the user.
+    throw new Error(`psql didn't return the expected JSON — here is what it printed:\n${out.slice(0, 500)}`);
+  }
 }
 
 function validIdent(name: string, label: string): string {

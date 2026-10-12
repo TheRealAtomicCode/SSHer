@@ -5,8 +5,8 @@
 // Docker/nginx/.NET/ufw, which are also always elevated.
 import { randomUUID } from 'node:crypto';
 import type { Express, Response } from 'express';
-import { badRequestRoute, need, run, runOrThrow, str, writeRemote, type AsyncRoute, type SessionRequest } from './ops.js';
-import { shellQuote, type SshSession } from './ssh.js';
+import { asRoot, badRequestRoute, need, run, runOrThrow, str, writeRemote, type AsyncRoute, type SessionRequest } from './ops.js';
+import { execWithInput, shellQuote, type SshSession } from './ssh.js';
 
 // A service account's shell is usually nologin/false — this is the signal the
 // client uses to collapse those into their own section rather than hiding them,
@@ -138,6 +138,55 @@ export function registerUsers(app: Express, requireSession: import('express').Re
     requireSession,
     route(async (req, res) => {
       res.json(await listSystemUsers(req.session!));
+    }),
+  );
+
+  app.post(
+    '/api/users',
+    requireSession,
+    route(async (req, res) => {
+      const session = req.session!;
+      const name = str(req.body?.name);
+      need(USERNAME_RE.test(name), 'Username must be lowercase letters, digits, - or _, starting with a letter or underscore');
+
+      const systemAccount = Boolean(req.body?.systemAccount);
+      const createHome = req.body?.createHome !== false;
+      const shell = str(req.body?.shell) || (systemAccount ? '/usr/sbin/nologin' : '/bin/bash');
+      need(/^\/[\w./-]+$/.test(shell), 'Invalid shell path');
+      const groups = (Array.isArray(req.body?.groups) ? req.body.groups : []).map(String).filter(Boolean);
+      for (const g of groups) need(USERNAME_RE.test(g), `Invalid group: ${g}`);
+
+      const args = ['useradd', createHome ? '-m' : '-M'];
+      if (systemAccount) args.push('-r');
+      args.push('-s', shellQuote(shell));
+      if (groups.length) args.push('-G', shellQuote(groups.join(',')));
+      args.push('--', shellQuote(name));
+      await runOrThrow(session, args.join(' '));
+
+      const password = str(req.body?.password);
+      if (password) {
+        need(!/[\r\n]/.test(password), 'Password cannot contain a line break');
+        const result = await execWithInput(session, asRoot(session, 'chpasswd'), `${name}:${password}\n`);
+        if (result.code !== 0) throw new Error(result.stderr.trim() || 'Could not set the password');
+      }
+
+      res.json({ ok: true });
+    }),
+  );
+
+  app.post(
+    '/api/users/:name/delete',
+    requireSession,
+    route(async (req, res) => {
+      const session = req.session!;
+      const name = str(req.params.name);
+      need(USERNAME_RE.test(name), 'invalid username');
+      need(name !== session.username, "You can't delete the account you're connected as.");
+      need(name !== 'root', 'Refusing to delete root.');
+
+      const removeHome = Boolean(req.body?.removeHome);
+      const output = await runOrThrow(session, `userdel ${removeHome ? '-r ' : ''}-- ${shellQuote(name)} 2>&1`);
+      res.json({ ok: true, output });
     }),
   );
 

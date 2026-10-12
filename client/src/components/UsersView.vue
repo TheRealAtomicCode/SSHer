@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, reactive, ref } from 'vue';
 import * as api from '../api';
 import { sudoMode } from '../sudoMode';
 import { fail, notify } from '../toast';
@@ -13,6 +13,17 @@ const showService = ref(false);
 const selected = ref<SystemUser | null>(null);
 const busy = ref(false);
 const rule = ref('');
+
+const newUserOpen = ref(false);
+const newUser = reactive({
+  name: '',
+  systemAccount: false,
+  createHome: true,
+  shell: '',
+  groupsText: '',
+  setPassword: false,
+  password: '',
+});
 
 async function refresh() {
   loading.value = true;
@@ -85,6 +96,51 @@ function revokeAll(user: SystemUser) {
   applySudo(user, { removeAll: true });
 }
 
+function openNewUser() {
+  Object.assign(newUser, { name: '', systemAccount: false, createHome: true, shell: '', groupsText: '', setPassword: false, password: '' });
+  newUserOpen.value = true;
+}
+
+async function submitNewUser() {
+  if (!/^[a-z_][a-z0-9_-]*$/.test(newUser.name)) {
+    fail(new Error('Username must be lowercase letters, digits, - or _, starting with a letter or underscore.'));
+    return;
+  }
+  busy.value = true;
+  try {
+    await api.createUser({
+      name: newUser.name,
+      createHome: newUser.createHome,
+      systemAccount: newUser.systemAccount,
+      shell: newUser.shell || undefined,
+      groups: newUser.groupsText.split(',').map((g) => g.trim()).filter(Boolean),
+      password: newUser.setPassword ? newUser.password : undefined,
+    });
+    notify(`Created ${newUser.name}`);
+    newUserOpen.value = false;
+    await refresh();
+  } catch (err) {
+    fail(err);
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function removeUser(user: SystemUser) {
+  if (!confirm(`Delete the user "${user.name}"?\n\nAlso deletes its home directory (${user.home}). This cannot be undone.`)) return;
+  busy.value = true;
+  try {
+    await api.deleteUser(user.name, true);
+    notify(`Deleted ${user.name}`);
+    if (selected.value?.name === user.name) selected.value = null;
+    await refresh();
+  } catch (err) {
+    fail(err);
+  } finally {
+    busy.value = false;
+  }
+}
+
 onMounted(refresh);
 
 const btn =
@@ -104,6 +160,14 @@ const btn =
         </div>
         <button class="rounded-md p-2 text-slate-400 hover:bg-slate-800 hover:text-white" title="Refresh" @click="refresh">
           <v-icon name="fa-sync-alt" scale="0.85" :class="loading && 'animate-spin'" />
+        </button>
+        <button
+          class="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-40"
+          :disabled="!sudoMode.enabled"
+          :title="!sudoMode.enabled ? 'Turn on sudo mode to create a user' : ''"
+          @click="openNewUser"
+        >
+          <v-icon name="fa-plus" scale="0.75" /> New user
         </button>
       </div>
 
@@ -160,6 +224,14 @@ const btn =
                   @click="revokeAll(user)"
                 >
                   <v-icon name="fa-ban" scale="0.7" /> Revoke all sudo access
+                </button>
+                <button
+                  class="ml-auto rounded-lg border border-red-900 px-2.5 py-1.5 text-xs text-red-400 transition hover:bg-red-950 disabled:cursor-not-allowed disabled:opacity-40"
+                  :disabled="!sudoMode.enabled || busy || isSelf(user)"
+                  :title="isSelf(user) ? 'Cannot delete the account you are connected as' : ''"
+                  @click="removeUser(user)"
+                >
+                  <v-icon name="fa-trash-alt" scale="0.7" /> Delete user
                 </button>
               </div>
 
@@ -223,6 +295,13 @@ const btn =
                 <button v-if="user.sudoFile" :class="btn" :disabled="!sudoMode.enabled || busy" @click="removeRuleFile(user)">
                   <v-icon name="fa-times" scale="0.7" /> Remove sudoers rule
                 </button>
+                <button
+                  class="ml-auto rounded-lg border border-red-900 px-2.5 py-1.5 text-xs text-red-400 transition hover:bg-red-950 disabled:cursor-not-allowed disabled:opacity-40"
+                  :disabled="!sudoMode.enabled || busy || isSelf(user)"
+                  @click="removeUser(user)"
+                >
+                  <v-icon name="fa-trash-alt" scale="0.7" /> Delete user
+                </button>
               </div>
               <div>
                 <label class="mb-1.5 block text-xs font-medium text-slate-400">Custom sudoers rule</label>
@@ -242,6 +321,64 @@ const btn =
           </div>
         </div>
       </template>
+    </div>
+
+    <!-- New user -->
+    <div
+      v-if="newUserOpen"
+      data-modal
+      class="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/85 p-4 backdrop-blur-sm"
+      @click.self="newUserOpen = false"
+    >
+      <div class="w-full max-w-sm rounded-xl border border-slate-700 bg-slate-900 p-5 shadow-2xl">
+        <h2 class="mb-4 text-base font-semibold text-white">New user</h2>
+
+        <label class="mb-1.5 block text-xs font-medium text-slate-400">Username</label>
+        <input v-model="newUser.name" class="mb-3 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-sm text-slate-100 focus:border-emerald-500 focus:outline-none" placeholder="app_deploy" />
+
+        <label class="mb-3 flex items-center gap-2 text-xs text-slate-300">
+          <input v-model="newUser.systemAccount" type="checkbox" class="accent-emerald-500" />
+          Service account (no login, system UID range)
+        </label>
+
+        <label class="mb-3 flex items-center gap-2 text-xs text-slate-300">
+          <input v-model="newUser.createHome" type="checkbox" class="accent-emerald-500" />
+          Create a home directory
+        </label>
+
+        <label class="mb-1.5 block text-xs font-medium text-slate-400">Shell <span class="text-slate-600">(optional)</span></label>
+        <input
+          v-model="newUser.shell"
+          class="mb-3 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-xs text-slate-100 placeholder:text-slate-600 focus:border-emerald-500 focus:outline-none"
+          :placeholder="newUser.systemAccount ? '/usr/sbin/nologin' : '/bin/bash'"
+        />
+
+        <label class="mb-1.5 block text-xs font-medium text-slate-400">Extra groups <span class="text-slate-600">(optional, comma-separated)</span></label>
+        <input v-model="newUser.groupsText" class="mb-3 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-xs text-slate-100 placeholder:text-slate-600 focus:border-emerald-500 focus:outline-none" placeholder="docker, www-data" />
+
+        <label class="mb-3 flex items-center gap-2 text-xs text-slate-300">
+          <input v-model="newUser.setPassword" type="checkbox" class="accent-emerald-500" />
+          Set a password
+        </label>
+        <input
+          v-if="newUser.setPassword"
+          v-model="newUser.password"
+          type="password"
+          class="mb-3 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-sm text-slate-100 focus:border-emerald-500 focus:outline-none"
+        />
+        <p v-else class="mb-3 text-[11px] text-slate-500">No password means no password login — fine for SSH-key or service accounts.</p>
+
+        <div class="flex justify-end gap-2">
+          <button class="rounded-lg px-3 py-2 text-sm text-slate-400 hover:bg-slate-800" @click="newUserOpen = false">Cancel</button>
+          <button
+            class="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-500 disabled:opacity-50"
+            :disabled="!newUser.name || busy"
+            @click="submitNewUser"
+          >
+            Create
+          </button>
+        </div>
+      </div>
     </div>
   </div>
 </template>

@@ -467,6 +467,21 @@ export function users(): Promise<{ users: SystemUser[]; groups: SystemGroup[] }>
   return request('/users');
 }
 
+export function createUser(spec: {
+  name: string;
+  createHome?: boolean;
+  systemAccount?: boolean;
+  shell?: string;
+  groups?: string[];
+  password?: string;
+}): Promise<void> {
+  return request('/users', { method: 'POST', body: json(spec) });
+}
+
+export function deleteUser(name: string, removeHome = false): Promise<{ output: string }> {
+  return request(`/users/${encodeURIComponent(name)}/delete`, { method: 'POST', body: json({ removeHome }) });
+}
+
 export function setUserSudo(name: string, change: SudoChange): Promise<void> {
   return request(`/users/${encodeURIComponent(name)}/sudo`, { method: 'POST', body: json(change) });
 }
