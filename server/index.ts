@@ -6,6 +6,7 @@ import cors from 'cors';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import multer from 'multer';
 import { registerArchive } from './archive.js';
+import { registerDotnet } from './dotnet.js';
 import { registerNginx } from './nginx.js';
 import { registerOps } from './ops.js';
 import {
@@ -465,6 +466,7 @@ app.post(
 registerOps(app, requireSession as express.RequestHandler, asyncRoute, upload);
 registerArchive(app, requireSession as express.RequestHandler, asyncRoute);
 registerNginx(app, requireSession as express.RequestHandler, asyncRoute, upload);
+registerDotnet(app, requireSession as express.RequestHandler, asyncRoute, upload);
 
 app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
   console.error('[api]', err.message);

@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import * as api from './api';
 import ConnectPanel from './components/ConnectPanel.vue';
 import DockerView from './components/DockerView.vue';
+import DotNetView from './components/DotNetView.vue';
 import FileExplorer from './components/FileExplorer.vue';
 import HomeView from './components/HomeView.vue';
 import LogsView from './components/LogsView.vue';
@@ -150,6 +151,7 @@ const NAV: { view: View; label: string; icon: string; sub?: boolean }[] = [
   { view: 'shortcuts', label: 'Shortcuts', icon: 'fa-star', sub: true },
   { view: 'links', label: 'Quick Links', icon: 'fa-link' },
   { view: 'nginx', label: 'Nginx', icon: 'fa-globe' },
+  { view: 'dotnet', label: '.NET apps', icon: 'si-dotnet' },
   { view: 'docker', label: 'Docker', icon: 'fa-docker' },
   { view: 'logs', label: 'Container logs', icon: 'fa-terminal', sub: true },
   { view: 'ports', label: 'Ports & Firewall', icon: 'fa-shield-alt' },
@@ -297,6 +299,8 @@ const NAV: { view: View; label: string; icon: string; sub?: boolean }[] = [
         <QuickLinksView v-if="view === 'links'" @open-path="openShortcut" />
 
         <NginxView v-if="view === 'nginx'" @open-path="openShortcut" />
+
+        <DotNetView v-if="view === 'dotnet'" />
 
         <DockerView
           v-if="view === 'docker'"

@@ -244,3 +244,46 @@ export interface LocalApp {
   /** `host:port` — pre-fills the add-site wizard's target field. */
   target: string;
 }
+
+// -------------------------------------------------------------------- .NET
+
+export interface DotnetRuntime {
+  name: string;
+  version: string;
+}
+
+export interface DotnetContext {
+  available: boolean;
+  runtimes: DotnetRuntime[];
+  usedPorts: number[];
+}
+
+export interface DotnetInspectResult {
+  ok: boolean;
+  stagingDir: string;
+  mainDll: string;
+  suggestedName: string;
+  selfContained: boolean;
+  required: DotnetRuntime | null;
+  dotnetAvailable: boolean;
+  installedRuntimes: DotnetRuntime[];
+  compatible: boolean;
+}
+
+export interface DotnetDeploySpec {
+  stagingDir: string;
+  mainDll: string;
+  name: string;
+  port: number | null;
+  env: { key: string; value: string }[];
+  domain: string;
+  maxBody: string;
+  overwrite: boolean;
+}
+
+export interface DotnetApp {
+  name: string;
+  state: string;
+  port: number;
+  dir: string;
+}

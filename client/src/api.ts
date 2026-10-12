@@ -8,6 +8,10 @@ import type {
   DeploySpec,
   DockerContext,
   DockerImage,
+  DotnetApp,
+  DotnetContext,
+  DotnetDeploySpec,
+  DotnetInspectResult,
   ImageInfo,
   Listing,
   LocalApp,
@@ -379,6 +383,36 @@ export function nginxSetEnabled(name: string, enabled: boolean): Promise<{ outpu
 
 export function nginxDeleteSite(name: string): Promise<{ output: string }> {
   return request(`/nginx/sites/${encodeURIComponent(name)}/delete`, { method: 'POST' });
+}
+
+// -------------------------------------------------------------------- .NET
+
+export function dotnetContext(): Promise<DotnetContext> {
+  return request('/dotnet/context');
+}
+
+export function dotnetInspect(file: File, onProgress?: (percent: number) => void): Promise<DotnetInspectResult> {
+  const form = new FormData();
+  form.append('app', file);
+  return postForm('/dotnet/inspect', form, onProgress);
+}
+
+export function dotnetInstallRuntime(name: string, version: string): Promise<{ output: string }> {
+  return request('/dotnet/install-runtime', { method: 'POST', body: json({ name, version }) });
+}
+
+export function dotnetDeploy(
+  spec: DotnetDeploySpec,
+): Promise<{ log: StepResult[]; name: string; port: number; dir: string; url: string }> {
+  return request('/dotnet/deploy', { method: 'POST', body: json(spec) });
+}
+
+export function dotnetApps(): Promise<{ apps: DotnetApp[] }> {
+  return request('/dotnet/apps');
+}
+
+export function dotnetAction(name: string, action: 'start' | 'stop' | 'restart' | 'remove'): Promise<{ output: string }> {
+  return request('/dotnet/action', { method: 'POST', body: json({ name, action }) });
 }
 
 // ------------------------------------------------------------------ archive

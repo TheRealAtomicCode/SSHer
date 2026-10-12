@@ -27,6 +27,13 @@ const TILES: { view: View; title: string; text: string; icon: string; tone: stri
     tone: 'from-emerald-500/20 text-emerald-300 ring-emerald-500/30',
   },
   {
+    view: 'dotnet',
+    title: '.NET apps',
+    text: 'Host-level .NET web apps as systemd services — drop a publish .zip, and it checks the runtime first.',
+    icon: 'si-dotnet',
+    tone: 'from-sky-500/20 text-sky-300 ring-sky-500/30',
+  },
+  {
     view: 'docker',
     title: 'Docker',
     text: 'Containers, logs, compose configs, updates — and deploy a new image by drag & drop.',
