@@ -526,6 +526,10 @@ export function postgresContext(): Promise<PostgresContext> {
   return request('/postgres/context');
 }
 
+export function postgresInstall(): Promise<{ log: StepResult[] }> {
+  return request('/postgres/install', { method: 'POST' });
+}
+
 export function postgresRoles(): Promise<{ roles: PostgresRole[] }> {
   return request('/postgres/roles');
 }

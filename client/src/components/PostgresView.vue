@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue';
 import * as api from '../api';
+import { ApiError } from '../api';
 import { sudoMode } from '../sudoMode';
 import { fail, notify } from '../toast';
 import type {
@@ -13,7 +14,9 @@ import type {
   PostgresSchemaPrivileges,
   PostgresTablePrivilege,
   PostgresTablePrivileges,
+  StepResult,
 } from '../types';
+import StepLog from './StepLog.vue';
 
 const ROLE_ATTRS = ['canlogin', 'superuser', 'createdb', 'createrole', 'replication', 'bypassrls'] as const;
 const ROLE_ATTR_LABEL: Record<(typeof ROLE_ATTRS)[number], string> = {
@@ -83,6 +86,25 @@ async function refresh() {
     fail(err);
   } finally {
     loading.value = false;
+  }
+}
+
+const installing = ref(false);
+const installLog = ref<{ title: string; steps: StepResult[]; running: boolean; error: string } | null>(null);
+
+async function installPostgres() {
+  if (!confirm('Install PostgreSQL on this server?\n\nRuns apt-get install postgresql postgresql-contrib, then enables and starts the service.')) return;
+  installing.value = true;
+  installLog.value = { title: 'Installing PostgreSQL', steps: [], running: true, error: '' };
+  try {
+    const res = await api.postgresInstall();
+    installLog.value = { title: 'Installing PostgreSQL', steps: res.log, running: false, error: '' };
+    await refresh();
+  } catch (err) {
+    const log = err instanceof ApiError ? ((err.payload.log as StepResult[]) ?? []) : [];
+    installLog.value = { title: 'Installing PostgreSQL', steps: log, running: false, error: (err as Error).message };
+  } finally {
+    installing.value = false;
   }
 }
 
@@ -301,6 +323,14 @@ const label = 'mb-1.5 block text-xs font-medium text-slate-400';
 
         <div v-else-if="!context?.installed" class="rounded-xl border border-amber-800/50 bg-amber-950/30 p-6 text-sm text-amber-200">
           <p class="font-medium">PostgreSQL isn't installed on this server.</p>
+          <button
+            class="mt-3 flex items-center gap-2 rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-500 disabled:opacity-60"
+            :disabled="installing"
+            @click="installPostgres"
+          >
+            <v-icon :name="installing ? 'fa-spinner' : 'fa-cloud-download-alt'" :class="installing && 'animate-spin'" scale="0.8" />
+            {{ installing ? 'Installing…' : 'Install PostgreSQL' }}
+          </button>
         </div>
 
         <div v-else-if="!context.reachable" class="rounded-xl border border-amber-800/50 bg-amber-950/30 p-6 text-sm text-amber-200">
@@ -492,5 +522,14 @@ const label = 'mb-1.5 block text-xs font-medium text-slate-400';
         </div>
       </div>
     </div>
+
+    <StepLog
+      v-if="installLog"
+      :title="installLog.title"
+      :steps="installLog.steps"
+      :running="installLog.running"
+      :error="installLog.error"
+      @close="installLog = null"
+    />
   </div>
 </template>

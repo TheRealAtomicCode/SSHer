@@ -11,7 +11,7 @@
 // literal error from attempting it, in /api/postgres/context, rather than guessed at.
 import { randomUUID } from 'node:crypto';
 import type { Express, Response } from 'express';
-import { badRequestRoute, need, run, str, type AsyncRoute, type SessionRequest } from './ops.js';
+import { badRequestRoute, need, run, runSteps, str, type AsyncRoute, type SessionRequest, type Step } from './ops.js';
 import { exec, execWithInput, shellQuote, type SshSession } from './ssh.js';
 
 const PG_IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -139,6 +139,26 @@ export function registerPostgres(app: Express, requireSession: import('express')
         version: check.code === 0 ? check.stdout.trim() : '',
         error: check.code === 0 ? '' : (check.stdout + check.stderr).trim(),
       });
+    }),
+  );
+
+  /** Debian/Ubuntu's default `postgresql` package — the same distro-family
+   *  assumption the rest of the app already makes (apt, systemd, ufw). */
+  app.post(
+    '/api/postgres/install',
+    requireSession,
+    route(async (req, res) => {
+      const steps: Step[] = [
+        { title: 'Update package lists', command: 'apt-get update 2>&1' },
+        { title: 'Install PostgreSQL', command: 'DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql postgresql-contrib 2>&1' },
+        { title: 'Enable and start the service', command: 'systemctl enable --now postgresql 2>&1' },
+      ];
+      const { log, ok } = await runSteps(req.session!, steps);
+      if (!ok) {
+        res.status(500).json({ error: `${log.at(-1)!.title} failed`, log });
+        return;
+      }
+      res.json({ ok: true, log });
     }),
   );
 

@@ -2,12 +2,32 @@
 import { computed, onMounted, ref } from 'vue';
 import * as api from '../api';
 import { fail, notify } from '../toast';
-import type { DotnetApp, DotnetInspectResult } from '../types';
+import type { DotnetApp, DotnetContext, DotnetInspectResult } from '../types';
 import DotnetDeployWizard from './DotnetDeployWizard.vue';
 
 const loading = ref(true);
 const apps = ref<DotnetApp[]>([]);
 const busy = ref<Set<string>>(new Set());
+
+const dotnetContext = ref<DotnetContext | null>(null);
+const installChannel = ref('8.0');
+const installingRuntime = ref(false);
+const installOutput = ref('');
+
+async function installDotnet() {
+  installingRuntime.value = true;
+  installOutput.value = '';
+  try {
+    const res = await api.dotnetInstallRuntime('Microsoft.AspNetCore.App', `${installChannel.value}.0`);
+    installOutput.value = res.output;
+    notify('.NET installed');
+    dotnetContext.value = await api.dotnetContext().catch(() => dotnetContext.value);
+  } catch (err) {
+    installOutput.value = (err as Error).message;
+  } finally {
+    installingRuntime.value = false;
+  }
+}
 
 const dropping = ref(false);
 const inspecting = ref(false);
@@ -114,7 +134,10 @@ function onWizardDeployed() {
   refresh();
 }
 
-onMounted(refresh);
+onMounted(async () => {
+  await refresh();
+  dotnetContext.value = await api.dotnetContext().catch(() => null);
+});
 
 const btn = 'rounded-md p-1.5 text-slate-400 transition hover:bg-slate-800 hover:text-white disabled:opacity-30';
 const STATE_TONE: Record<string, string> = {
@@ -146,6 +169,31 @@ const STATE_TONE: Record<string, string> = {
     </div>
 
     <div class="min-h-0 flex-1 overflow-auto p-5">
+      <!-- Not installed -->
+      <div v-if="dotnetContext && !dotnetContext.available" class="mb-5 rounded-xl border border-amber-800/50 bg-amber-950/30 p-4 text-sm text-amber-200">
+        <p class="font-medium">.NET isn't installed on this server.</p>
+        <p class="mt-1 text-xs text-amber-300/80">
+          Installs the ASP.NET Core runtime via Microsoft's official script (not a guessed distro package name,
+          which varies and often lags behind). Pick the version your app targets — 8.0 is the current LTS.
+        </p>
+        <div class="mt-3 flex items-center gap-2">
+          <select v-model="installChannel" class="rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-xs text-slate-100 focus:border-sky-500 focus:outline-none">
+            <option value="6.0">6.0 (old LTS)</option>
+            <option value="8.0">8.0 (LTS)</option>
+            <option value="9.0">9.0</option>
+          </select>
+          <button
+            class="flex items-center gap-2 rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-500 disabled:opacity-60"
+            :disabled="installingRuntime"
+            @click="installDotnet"
+          >
+            <v-icon :name="installingRuntime ? 'fa-spinner' : 'fa-cloud-download-alt'" :class="installingRuntime && 'animate-spin'" scale="0.75" />
+            {{ installingRuntime ? 'Installing…' : 'Install .NET' }}
+          </button>
+        </div>
+        <pre v-if="installOutput" class="mt-3 max-h-40 overflow-auto rounded-lg bg-slate-950/60 px-3 py-2 font-mono text-[11px] whitespace-pre-wrap text-amber-100/70">{{ installOutput }}</pre>
+      </div>
+
       <!-- Drop zone -->
       <label
         class="mb-5 flex cursor-pointer items-center gap-4 rounded-xl border-2 border-dashed border-slate-700 bg-slate-900/40 px-5 py-4 transition hover:border-sky-600 hover:bg-sky-500/5"
