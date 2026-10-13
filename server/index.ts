@@ -8,7 +8,7 @@ import multer from 'multer';
 import { registerArchive } from './archive.js';
 import { registerDotnet } from './dotnet.js';
 import { registerNginx } from './nginx.js';
-import { execMaybeRootOrThrow, registerOps, str } from './ops.js';
+import { asRoot, execMaybeRootOrThrow, registerOps, run, str } from './ops.js';
 import { registerPermissions } from './permissions.js';
 import { registerMonitor } from './monitor.js';
 import { registerSecurity } from './security.js';
@@ -16,6 +16,8 @@ import { registerTwoFactor } from './twofa.js';
 import { registerPgBackRest } from './pgbackrest.js';
 import { registerDbTransfer } from './dbtransfer.js';
 import { registerPostgres } from './postgres.js';
+import { registerPgTunnel } from './pgtunnel.js';
+import { registerPgHba } from './pghba.js';
 import { registerProcesses } from './processes.js';
 import { registerTerminal } from './terminal.js';
 import { advanceTransfer, finishTransfer, getTransfer, startTransfer } from './transfers.js';
@@ -27,6 +29,7 @@ import {
   disconnect,
   probeSudo,
   execOrThrow,
+  execWithInput,
   getSession,
   readdir,
   realpath,
@@ -417,30 +420,66 @@ app.get(
   }),
 );
 
+/** SFTP runs as the login user, with no way to escalate — so a file it may not touch
+ *  (pg_hba.conf is postgres:postgres 0640, most of /etc/ssl is root-only) is refused
+ *  however much sudo that user has. That refusal is SSH_FX_PERMISSION_DENIED (3). */
+function permissionDenied(err: unknown): boolean {
+  return (err as { code?: unknown })?.code === 3 || /permission denied/i.test((err as Error)?.message ?? '');
+}
+
+/** Throws sudo's own words, so a missing sudo password reaches the client as the
+ *  "sudo: a password is required" it turns into the password prompt. */
+async function runAsRootOrThrow(session: SshSession, command: string): Promise<string> {
+  const result = await run(session, command);
+  if (result.code !== 0) throw new Error((result.stderr || result.stdout).trim() || `command failed with exit code ${result.code}`);
+  return result.stdout;
+}
+
+/** The editor's read, through sudo — used only once SFTP has been refused. */
+async function readTextAsRoot(session: SshSession, target: string) {
+  const q = shellQuote(target);
+  const [kind, size] = (await runAsRootOrThrow(session, `stat -c '%F|%s' -- ${q}`)).trim().split('|');
+  if (kind === 'directory') throw Object.assign(new Error('Cannot read a directory as text'), { status: 400 });
+  const content = await runAsRootOrThrow(session, `head -c ${TEXT_PREVIEW_LIMIT + 1} -- ${q}`);
+  return { path: target, content, truncated: Number(size) > Buffer.byteLength(content), size: Number(size), binary: content.includes('\0'), elevated: true };
+}
+
 app.get(
   '/api/text',
   requireSession,
   asyncRoute(async (req, res) => {
     const session = req.session!;
     const target = remotePath(session, req.query.path);
-    const info = await stat(session, target);
-    if (info.isDirectory()) {
-      res.status(400).json({ error: 'Cannot read a directory as text' });
-      return;
-    }
-
+    let info: Awaited<ReturnType<typeof stat>>;
     const chunks: Buffer[] = [];
     let size = 0;
-    await new Promise<void>((resolve, reject) => {
-      const stream = session.sftp.createReadStream(target, { start: 0, end: TEXT_PREVIEW_LIMIT });
-      stream.on('data', (chunk: Buffer) => {
-        chunks.push(chunk);
-        size += chunk.length;
+    try {
+      info = await stat(session, target);
+      if (info.isDirectory()) {
+        res.status(400).json({ error: 'Cannot read a directory as text' });
+        return;
+      }
+      await new Promise<void>((resolve, reject) => {
+        const stream = session.sftp.createReadStream(target, { start: 0, end: TEXT_PREVIEW_LIMIT });
+        stream.on('data', (chunk: Buffer) => {
+          chunks.push(chunk);
+          size += chunk.length;
+        });
+        stream.on('error', reject);
+        stream.on('end', resolve);
+        stream.on('close', resolve);
       });
-      stream.on('error', reject);
-      stream.on('end', resolve);
-      stream.on('close', resolve);
-    });
+    } catch (err) {
+      if (!permissionDenied(err)) throw err;
+      try {
+        res.json(await readTextAsRoot(session, target));
+      } catch (rootErr) {
+        const status = (rootErr as { status?: number }).status;
+        if (status) res.status(status).json({ error: (rootErr as Error).message });
+        else throw rootErr;
+      }
+      return;
+    }
 
     const buffer = Buffer.concat(chunks);
     res.json({
@@ -466,13 +505,23 @@ app.post(
       return;
     }
 
-    await new Promise<void>((resolve, reject) => {
-      // Opening with 'w' truncates but keeps the existing file's permissions.
-      const write = session.sftp.createWriteStream(target);
-      write.on('error', reject);
-      write.on('close', () => resolve());
-      write.end(Buffer.from(content, 'utf8'));
-    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        // Opening with 'w' truncates but keeps the existing file's permissions.
+        const write = session.sftp.createWriteStream(target);
+        write.on('error', reject);
+        write.on('close', () => resolve());
+        write.end(Buffer.from(content, 'utf8'));
+      });
+    } catch (err) {
+      if (!permissionDenied(err)) throw err;
+      // `tee` into an existing file keeps its owner and mode, as the SFTP path does.
+      const result = await execWithInput(session, asRoot(session, `tee ${shellQuote(target)} >/dev/null`), content);
+      if (result.code !== 0) throw new Error(result.stderr.trim() || `could not write ${target}`);
+      const size = Number((await runAsRootOrThrow(session, `stat -c %s -- ${shellQuote(target)}`)).trim());
+      res.json({ ok: true, path: target, size, elevated: true });
+      return;
+    }
 
     const info = await stat(session, target);
     res.json({ ok: true, path: target, size: info.size });
@@ -558,6 +607,8 @@ registerNginx(app, requireSession as express.RequestHandler, asyncRoute, upload)
 registerDotnet(app, requireSession as express.RequestHandler, asyncRoute, upload);
 registerUsers(app, requireSession as express.RequestHandler, asyncRoute);
 registerPostgres(app, requireSession as express.RequestHandler, asyncRoute);
+registerPgTunnel(app, requireSession as express.RequestHandler, asyncRoute);
+registerPgHba(app, requireSession as express.RequestHandler, asyncRoute);
 registerDbTransfer(app, requireSession as express.RequestHandler, asyncRoute);
 registerPermissions(app, requireSession as express.RequestHandler, asyncRoute);
 registerProcesses(app, requireSession as express.RequestHandler, asyncRoute);

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue';
 import * as api from '../api';
-import { QUICK_GROUPS, ALL_QUICK_PATHS, type QuickGroup, type QuickLink, type ServiceControl } from '../quicklinks';
+import { DEFAULT_QUICK_VARS, quickPaths, resolveQuickGroups, type QuickGroup, type QuickLink, type ServiceControl } from '../quicklinks';
 import { copyToClipboard } from '../files';
 import { fail, notify } from '../toast';
 import type { RemoteFile } from '../types';
@@ -12,6 +12,21 @@ import TextEditor from './TextEditor.vue';
 const emit = defineEmits<{ openPath: [{ path: string; isDirectory: boolean; reveal?: boolean }] }>();
 
 const status = ref<Record<string, string>>({});
+/** QUICK_GROUPS with this server's own paths filled in (PostgreSQL's version directory). */
+const groups = ref<QuickGroup[]>(resolveQuickGroups(DEFAULT_QUICK_VARS));
+
+async function resolvePaths() {
+  try {
+    const pg = await api.postgresPaths();
+    groups.value = resolveQuickGroups({
+      pgHba: pg.hbaFile || DEFAULT_QUICK_VARS.pgHba,
+      pgConf: pg.configFile || DEFAULT_QUICK_VARS.pgConf,
+      pgPort: pg.port ? String(pg.port) : DEFAULT_QUICK_VARS.pgPort,
+    });
+  } catch {
+    // Keep the defaults; they're greyed out if this server doesn't have them.
+  }
+}
 const found = ref<Record<string, 'file' | 'dir'> | null>(null);
 const running = ref('');
 const output = ref<{ group: string; title: string; text: string; ok: boolean } | null>(null);
@@ -126,7 +141,7 @@ async function renameLink(name: string) {
   try {
     await api.rename(link.path, name);
     notify(`Renamed to ${name} — this quick link still points at the old path, so it will now show as “not on this server”.`);
-    found.value = (await api.exists(ALL_QUICK_PATHS)).found;
+    found.value = (await api.exists(quickPaths(groups.value))).found;
   } catch (err) {
     fail(err);
   }
@@ -134,8 +149,9 @@ async function renameLink(name: string) {
 
 onMounted(async () => {
   refreshStatus();
+  await resolvePaths();
   try {
-    found.value = (await api.exists(ALL_QUICK_PATHS)).found;
+    found.value = (await api.exists(quickPaths(groups.value))).found;
   } catch (err) {
     fail(err);
   }
@@ -162,7 +178,7 @@ onMounted(async () => {
 
       <div class="grid gap-5 lg:grid-cols-2">
         <section
-          v-for="g in QUICK_GROUPS"
+          v-for="g in groups"
           :key="g.id"
           class="flex flex-col overflow-hidden rounded-2xl border border-slate-800 bg-slate-900/50"
         >

@@ -7,10 +7,19 @@
 // The target password is written to a temporary .pgpass file readable only by postgres
 // and deleted afterwards: it never appears on a command line, in `ps`, or in the
 // activity log.
+//
+// When the target's PostgreSQL only listens on its own loopback (the safe default: port
+// closed, reached by SSH tunnel), the "SSH tunnel" switch reaches it anyway. The SSHer
+// back end logs in to the target over SSH itself and asks THIS server's sshd for a
+// reverse forward (forwardIn) on 127.0.0.1:<random port>; each connection pg_dump/psql
+// make to it comes back to SSHer over this session and goes on over the target's SSH
+// connection to its 127.0.0.1:5432. Nothing to install on either server, no port to
+// open, and the SSH password stays in SSHer's memory — the servers never see it.
 import { randomUUID } from 'node:crypto';
 import type { Express, Response } from 'express';
 import { badRequestRoute, need, run, str, writeRemote, type AsyncRoute, type SessionRequest } from './ops.js';
 import { execAsPostgres, runPgJson } from './postgres.js';
+import { Client } from 'ssh2';
 import { shellQuote, type SshSession } from './ssh.js';
 
 const IDENT = /^[A-Za-z_][A-Za-z0-9_$-]{0,62}$/;
@@ -36,6 +45,115 @@ function parseTarget(body: Record<string, unknown>): Target {
   const sslmode = (['prefer', 'require', 'disable'] as const).find((m) => m === body.sslmode) ?? 'prefer';
   return { host, port, user, password, sslmode };
 }
+
+/** The target's SSH login, when its PostgreSQL is reached through a tunnel. */
+interface Tunnel {
+  host: string;
+  port: number;
+  username: string;
+  password: string;
+  privateKey: string;
+  passphrase: string;
+  /** Where PostgreSQL listens as seen FROM the target — almost always its own loopback. */
+  dbHost: string;
+  dbPort: number;
+}
+
+function parseTunnel(body: Record<string, unknown>): Tunnel | null {
+  const ssh = body.ssh as Record<string, unknown> | undefined;
+  if (!ssh?.enabled) return null;
+  const host = str(ssh.host);
+  need(HOST.test(host), 'Enter the target server’s SSH IP or hostname');
+  const port = Number(ssh.port) || 22;
+  need(Number.isInteger(port) && port > 0 && port < 65536, 'Invalid SSH port');
+  const username = str(ssh.username);
+  need(/^[A-Za-z0-9._-]{1,64}$/.test(username), 'Enter the SSH username for the target');
+  const password = String(ssh.password ?? '');
+  const privateKey = String(ssh.privateKey ?? '');
+  need(password || privateKey, 'Enter the SSH password (or a private key) for the target');
+  const dbHost = str(ssh.dbHost) || '127.0.0.1';
+  need(HOST.test(dbHost), 'Invalid PostgreSQL host on the target');
+  const dbPort = Number(ssh.dbPort) || 5432;
+  need(Number.isInteger(dbPort) && dbPort > 0 && dbPort < 65536, 'Invalid PostgreSQL port on the target');
+  return { host, port, username, password, privateKey, passphrase: String(ssh.passphrase ?? ''), dbHost, dbPort };
+}
+
+function sshLogin(tunnel: Tunnel): Promise<Client> {
+  return new Promise((resolve, reject) => {
+    const client = new Client();
+    let settled = false;
+    const done = (err?: Error) => {
+      if (settled) return;
+      settled = true;
+      if (err) {
+        client.end();
+        reject(new Error(`Couldn't log in to ${tunnel.username}@${tunnel.host}:${tunnel.port} over SSH: ${err.message}`));
+      } else resolve(client);
+    };
+    client.on('ready', () => done());
+    client.on('error', (err) => done(err));
+    client.on('close', () => done(new Error('the server closed the connection during login')));
+    // Password logins on Debian often come as keyboard-interactive.
+    client.on('keyboard-interactive', (_n, _i, _l, prompts, finish) => finish(prompts.map(() => tunnel.password)));
+    client.connect({
+      host: tunnel.host,
+      port: tunnel.port,
+      username: tunnel.username,
+      password: tunnel.password || undefined,
+      privateKey: tunnel.privateKey || undefined,
+      passphrase: tunnel.passphrase || undefined,
+      tryKeyboard: Boolean(tunnel.password),
+      readyTimeout: 20_000,
+      keepaliveInterval: 15_000,
+    });
+  });
+}
+
+/** Runs `fn` with the target as this server must address it: unchanged without a
+ *  tunnel, or 127.0.0.1:<forwarded port> on this server with one. */
+async function withTunnel<T>(session: SshSession, tunnel: Tunnel | null, t: Target, fn: (t: Target) => Promise<T>): Promise<T> {
+  if (!tunnel) return fn(t);
+  const target = await sshLogin(tunnel);
+  let bound = 0;
+  const onConnection = (
+    info: { destPort: number },
+    accept: () => import('ssh2').ClientChannel,
+    reject: () => void,
+  ) => {
+    if (info.destPort !== bound) return;
+    // A long copy is one HTTP request; without this the idle sweep could end the
+    // session — and the tunnel under pg_restore — half way through.
+    session.lastUsed = Date.now();
+    target.forwardOut('127.0.0.1', 0, tunnel.dbHost, tunnel.dbPort, (err, channel) => {
+      if (err) return reject();
+      const local = accept();
+      local.pipe(channel).pipe(local);
+      local.on('close', () => channel.close());
+      channel.on('close', () => local.close());
+      local.on('error', () => channel.close());
+      channel.on('error', () => local.close());
+    });
+  };
+  try {
+    bound = await new Promise<number>((resolve, reject) =>
+      session.conn.forwardIn('127.0.0.1', 0, (err, port) =>
+        err
+          ? reject(new Error(`This server refused to open the tunnel's local port (${err.message}) — its sshd needs AllowTcpForwarding yes`))
+          : resolve(port),
+      ),
+    );
+    session.conn.on('tcp connection', onConnection);
+    return await fn({ ...t, host: '127.0.0.1', port: bound });
+  } finally {
+    session.conn.off('tcp connection', onConnection);
+    if (bound) session.conn.unforwardIn('127.0.0.1', bound, () => {});
+    target.end();
+  }
+}
+
+/** How the target is named in messages — its real address, not the tunnel's. */
+const describe = (t: Target, tunnel: Tunnel | null) =>
+  tunnel ? `${t.user}@${tunnel.host} (SSH tunnel → ${tunnel.dbHost}:${tunnel.dbPort})` : `${t.user}@${t.host}:${t.port}`;
 
 /** .pgpass escapes `:` and `\` inside fields. */
 const pgpassField = (v: string) => v.replace(/\\/g, '\\\\').replace(/:/g, '\\:');
@@ -167,12 +285,13 @@ export function registerDbTransfer(app: Express, requireSession: import('express
     requireSession,
     route(async (req, res) => {
       const session = req.session!;
-      const t = parseTarget(req.body ?? {});
+      const tunnel = parseTunnel(req.body ?? {});
+      const t0 = parseTarget(tunnel ? { ...req.body, host: tunnel.host } : (req.body ?? {}));
       const targetDb = str(req.body?.targetDb);
-      await withPgpass(session, t, async (env) => {
+      await withTunnel(session, tunnel, t0, (t) => withPgpass(session, t, async (env) => {
         const v = await targetSql(session, env, t, 'postgres', `SELECT current_setting('server_version') || '|' || (SELECT rolcreatedb OR rolsuper FROM pg_roles WHERE rolname = current_user)`);
         if (!v.ok) {
-          res.status(400).json({ error: `Couldn't connect from this server to ${t.host}:${t.port}: ${reason(v.out)}` });
+          res.status(400).json({ error: `Couldn't connect from this server to ${describe(t0, tunnel)}: ${reason(v.out)}` });
           return;
         }
         const [version, canCreate] = v.out.split('|');
@@ -183,7 +302,7 @@ export function registerDbTransfer(app: Express, requireSession: import('express
         }
         const here = await runPgJson<string>(session, `SELECT to_json(current_setting('server_version'));`).catch(() => '');
         res.json({ ok: true, targetVersion: version, sourceVersion: here, canCreateDb: canCreate === 'true' || canCreate === 't', exists });
-      });
+      }));
     }),
   );
 
@@ -197,28 +316,30 @@ export function registerDbTransfer(app: Express, requireSession: import('express
       need(IDENT.test(source), 'Pick the database to transfer');
       const targetDb = str(body.targetDb) || source;
       need(IDENT.test(targetDb), 'Invalid target database name');
-      const t = parseTarget(body);
+      const tunnel = parseTunnel(body);
+      const t0 = parseTarget(tunnel ? { ...body, host: tunnel.host } : body);
+      const where = describe(t0, tunnel);
       const ifExists = body.ifExists === 'replace' ? 'replace' : 'stop';
       const log: { title: string; ok: boolean; output: string }[] = [];
       const started = Date.now();
 
       // Copying a database onto itself would drop the original first.
       const here = (await run(session, "hostname -I 2>/dev/null; echo 127.0.0.1 localhost ::1", true)).stdout.split(/\s+/).filter(Boolean);
-      need(!(here.includes(t.host) && targetDb === source), 'That is this same server and database — pick a different target name');
+      need(!(here.includes(t0.host) && targetDb === source), 'That is this same server and database — pick a different target name');
 
       const sizeBefore = await runPgJson<number>(session, `SELECT to_json(pg_database_size('${source}'));`).catch(() => 0);
 
-      await withPgpass(session, t, async (env) => {
+      await withTunnel(session, tunnel, t0, (t) => withPgpass(session, t, async (env) => {
         const fail = (error: string) => res.status(500).json({ error, log, seconds: Math.round((Date.now() - started) / 1000) });
 
         const ping = await targetSql(session, env, t, 'postgres', "SELECT current_setting('server_version')");
-        log.push({ title: `Connect to ${t.user}@${t.host}:${t.port}`, ok: ping.ok, output: ping.ok ? `PostgreSQL ${ping.out}` : reason(ping.out) });
-        if (!ping.ok) return fail(`Couldn't connect from this server to ${t.host}:${t.port}`);
+        log.push({ title: `Connect to ${where}`, ok: ping.ok, output: ping.ok ? `PostgreSQL ${ping.out}` : reason(ping.out) });
+        if (!ping.ok) return fail(`Couldn't connect from this server to ${where}`);
 
         const exists = (await targetSql(session, env, t, 'postgres', `SELECT 1 FROM pg_database WHERE datname = '${targetDb}'`)).out === '1';
         if (exists && ifExists === 'stop') {
           log.push({ title: `Target database "${targetDb}" already exists`, ok: false, output: 'Stopped — choose "replace it" to overwrite, or another name.' });
-          return fail(`"${targetDb}" already exists on ${t.host}`);
+          return fail(`"${targetDb}" already exists on ${t0.host}`);
         }
         if (exists) {
           const drop = await asPg(session, `${env} dropdb --if-exists --force -h ${shellQuote(t.host)} -p ${t.port} -U ${shellQuote(t.user)} ${shellQuote(targetDb)} 2>&1`);
@@ -282,7 +403,7 @@ export function registerDbTransfer(app: Express, requireSession: import('express
         }
 
         res.json({ ok: true, log, seconds: Math.round((Date.now() - started) / 1000), bytes: sizeBefore, summary: here });
-      });
+      }));
     }),
   );
 }

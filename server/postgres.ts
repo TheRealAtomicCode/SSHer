@@ -120,6 +120,44 @@ function validIdent(name: string, label: string): string {
   return name;
 }
 
+/** What "give this user access to <db>" means, as one transaction run inside that
+ *  database: CONNECT on it, USAGE on every schema, and either SELECT or
+ *  SELECT/INSERT/UPDATE/DELETE on every table and sequence — now AND for tables
+ *  created later. Default privileges only cover objects made by the role they name,
+ *  so they're set for both the database's owner (whoever the app migrates as) and
+ *  postgres. */
+async function accessGrantSql(session: SshSession, role: string, db: string, write: boolean): Promise<string> {
+  const info = await runPgJson<{ owner: string; schemas: string[] }>(
+    session,
+    `SELECT json_build_object(
+       'owner', (SELECT pg_catalog.pg_get_userbyid(datdba) FROM pg_database WHERE datname = current_database()),
+       'schemas', COALESCE((SELECT json_agg(nspname ORDER BY nspname) FROM pg_namespace
+                            WHERE nspname NOT IN ('information_schema') AND nspname !~ '^pg_'), '[]'::json));`,
+    db,
+  );
+  const r = pgIdent(role);
+  const tablePrivs = write ? 'SELECT, INSERT, UPDATE, DELETE' : 'SELECT';
+  const seqPrivs = write ? 'SELECT, USAGE' : 'SELECT';
+  const creators = [...new Set([info.owner, 'postgres'])].filter((x) => PG_IDENT_RE.test(x));
+  const lines = ['BEGIN;', `GRANT CONNECT ON DATABASE ${pgIdent(db)} TO ${r};`];
+  for (const schema of info.schemas.filter((x) => PG_IDENT_RE.test(x))) {
+    const s = pgIdent(schema);
+    lines.push(
+      `GRANT USAGE ON SCHEMA ${s} TO ${r};`,
+      `GRANT ${tablePrivs} ON ALL TABLES IN SCHEMA ${s} TO ${r};`,
+      `GRANT ${seqPrivs} ON ALL SEQUENCES IN SCHEMA ${s} TO ${r};`,
+    );
+    for (const creator of creators) {
+      lines.push(
+        `ALTER DEFAULT PRIVILEGES FOR ROLE ${pgIdent(creator)} IN SCHEMA ${s} GRANT ${tablePrivs} ON TABLES TO ${r};`,
+        `ALTER DEFAULT PRIVILEGES FOR ROLE ${pgIdent(creator)} IN SCHEMA ${s} GRANT ${seqPrivs} ON SEQUENCES TO ${r};`,
+      );
+    }
+  }
+  lines.push('COMMIT;');
+  return lines.join('\n');
+}
+
 // ------------------------------------------------------------------- routes
 
 export function registerPostgres(app: Express, requireSession: import('express').RequestHandler, asyncRoute: AsyncRoute): void {
@@ -143,6 +181,36 @@ export function registerPostgres(app: Express, requireSession: import('express')
         reachable: check.code === 0,
         version: check.code === 0 ? check.stdout.trim() : '',
         error: check.code === 0 ? '' : (check.stdout + check.stderr).trim(),
+      });
+    }),
+  );
+
+  /** Where this server's PostgreSQL keeps its config — the version is in the path
+   *  on Debian (/etc/postgresql/17/main), so Quick Links can't hard-code it. Asked
+   *  of PostgreSQL itself first (the cluster psql connects to, i.e. the one this
+   *  app manages), then guessed from the newest cluster directory when it can't
+   *  be asked (stopped, or no sudo -u postgres). Empty strings when neither works. */
+  app.get(
+    '/api/postgres/paths',
+    requireSession,
+    route(async (req, res) => {
+      const session = req.session!;
+      const asked = await execAsPostgres(
+        session,
+        `psql -X -At -q -c "SELECT current_setting('hba_file') || '|' || current_setting('config_file') || '|' || current_setting('port')" 2>/dev/null`,
+      ).catch(() => null);
+      const [hbaFile, configFile, port] = asked?.code === 0 ? asked.stdout.trim().split('|') : [];
+      if (hbaFile && configFile) {
+        res.json({ hbaFile, configFile, port: Number(port) || 5432, source: 'postgres' });
+        return;
+      }
+      const dirs = await exec(session, 'ls -d /etc/postgresql/*/*/ 2>/dev/null | sort -V', true);
+      const dir = dirs.stdout.trim().split('\n').filter(Boolean).at(-1)?.replace(/\/$/, '') ?? '';
+      res.json({
+        hbaFile: dir ? `${dir}/pg_hba.conf` : '',
+        configFile: dir ? `${dir}/postgresql.conf` : '',
+        port: 0,
+        source: dir ? 'guess' : 'none',
       });
     }),
   );
@@ -201,7 +269,24 @@ export function registerPostgres(app: Express, requireSession: import('express')
       }
       const password = str(req.body?.password);
       if (password) parts.push(`PASSWORD ${pgLiteral(password)}`);
-      await runPgSql(req.session!, `${parts.join(' ')};`);
+
+      const access = str(req.body?.access);
+      const db = str(req.body?.database);
+      need(!db || access === 'readonly' || access === 'readwrite', 'Choose read-only or read-write access');
+      if (db) validIdent(db, 'database name');
+
+      const session = req.session!;
+      await runPgSql(session, `${parts.join(' ')};`);
+      if (db) {
+        try {
+          await runPgSql(session, await accessGrantSql(session, name, db, access === 'readwrite'), db);
+        } catch (err) {
+          // Half a user — able to log in but not to the database it was made for —
+          // is worse than none; take it back so the form can simply be retried.
+          await runPgSql(session, `DROP ROLE IF EXISTS ${pgIdent(name)};`).catch(() => {});
+          throw err;
+        }
+      }
       res.json({ ok: true });
     }),
   );
@@ -255,6 +340,74 @@ export function registerPostgres(app: Express, requireSession: import('express')
          ) d;`,
       );
       res.json({ databases });
+    }),
+  );
+
+  /** A database, owned by an existing role or by a login user made for it in the
+   *  same step — the usual "one app, one database, one user" setup. The owner
+   *  is what an app migrating its own schema needs: since PostgreSQL 15 the
+   *  public schema belongs to the database's owner, so nothing else is granted. */
+  app.post(
+    '/api/postgres/databases',
+    requireSession,
+    route(async (req, res) => {
+      const session = req.session!;
+      const name = validIdent(str(req.body?.name), 'database name');
+      const newOwner = req.body?.newOwner as { name?: unknown; password?: unknown } | undefined;
+      let owner = str(req.body?.owner) || 'postgres';
+      let createdRole = '';
+      if (newOwner) {
+        owner = validIdent(str(newOwner.name), 'user name');
+        const password = str(newOwner.password);
+        need(password, 'The new user needs a password');
+        await runPgSql(session, `CREATE ROLE ${pgIdent(owner)} LOGIN PASSWORD ${pgLiteral(password)};`);
+        createdRole = owner;
+      } else {
+        validIdent(owner, 'owner');
+      }
+      try {
+        // CREATE DATABASE can't run inside a transaction, so it is a statement of its own.
+        await runPgSql(session, `CREATE DATABASE ${pgIdent(name)} OWNER ${pgIdent(owner)} ENCODING 'UTF8';`);
+      } catch (err) {
+        if (createdRole) await runPgSql(session, `DROP ROLE IF EXISTS ${pgIdent(createdRole)};`).catch(() => {});
+        throw err;
+      }
+      res.json({ ok: true, owner });
+    }),
+  );
+
+  app.post(
+    '/api/postgres/databases/:db/owner',
+    requireSession,
+    route(async (req, res) => {
+      const db = validIdent(str(req.params.db), 'database name');
+      const owner = validIdent(str(req.body?.owner), 'owner');
+      // The schema too: a database created before PG 15, or restored from a dump,
+      // can still have public owned by postgres, which leaves the new owner unable
+      // to create tables in it.
+      await runPgSql(req.session!, `ALTER DATABASE ${pgIdent(db)} OWNER TO ${pgIdent(owner)};`);
+      await runPgSql(
+        req.session!,
+        `DO $$ BEGIN
+           IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'public' AND nspowner = 'postgres'::regrole) THEN
+             EXECUTE format('ALTER SCHEMA public OWNER TO %I', ${pgLiteral(owner)});
+           END IF;
+         END $$;`,
+        db,
+      );
+      res.json({ ok: true });
+    }),
+  );
+
+  app.post(
+    '/api/postgres/databases/:db/delete',
+    requireSession,
+    route(async (req, res) => {
+      const db = validIdent(str(req.params.db), 'database name');
+      need(!['postgres', 'template0', 'template1'].includes(db), `${db} is a system database`);
+      need(str(req.body?.confirm) === db, 'Type the database name to confirm');
+      await runPgSql(req.session!, `DROP DATABASE ${pgIdent(db)};`);
+      res.json({ ok: true });
     }),
   );
 

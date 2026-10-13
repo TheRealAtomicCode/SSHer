@@ -41,6 +41,8 @@ import type {
   PostgresSchemaPrivileges,
   PostgresTablePrivilege,
   PostgresTablePrivileges,
+  PostgresTunnelState,
+  PgHbaState,
   ProcessInfo,
   Session,
   Signal,
@@ -608,8 +610,43 @@ export function postgresCreateRole(spec: {
   createrole?: boolean;
   replication?: boolean;
   bypassrls?: boolean;
+  /** Also give the new role access to this database (every schema, existing and future tables). */
+  database?: string;
+  access?: 'readonly' | 'readwrite';
 }): Promise<void> {
   return request('/postgres/roles', { method: 'POST', body: json(spec) });
+}
+
+export function postgresPaths(): Promise<{ hbaFile: string; configFile: string; port: number; source: 'postgres' | 'guess' | 'none' }> {
+  return request('/postgres/paths');
+}
+
+export function postgresHba(): Promise<PgHbaState> {
+  return request('/postgres/hba');
+}
+
+export function postgresHbaAdd(rule: { type: string; database: string; user: string; address: string; method: string }): Promise<void> {
+  return request('/postgres/hba/rules', { method: 'POST', body: json(rule) });
+}
+
+export function postgresSetListen(value: string): Promise<void> {
+  return request('/postgres/listen', { method: 'POST', body: json({ value }) });
+}
+
+export function postgresHbaRemove(line: number): Promise<void> {
+  return request(`/postgres/hba/rules/${line}/delete`, { method: 'POST' });
+}
+
+export function postgresTunnel(): Promise<PostgresTunnelState> {
+  return request('/postgres/tunnel');
+}
+
+export function postgresTunnelStart(localPort: number): Promise<PostgresTunnelState> {
+  return request('/postgres/tunnel/start', { method: 'POST', body: json({ localPort }) });
+}
+
+export function postgresTunnelStop(): Promise<PostgresTunnelState> {
+  return request('/postgres/tunnel/stop', { method: 'POST' });
 }
 
 export function postgresDeleteRole(name: string): Promise<void> {
@@ -636,6 +673,24 @@ export function postgresSetAttributes(
 
 export function postgresDatabases(): Promise<{ databases: PostgresDatabase[] }> {
   return request('/postgres/databases');
+}
+
+export function postgresCreateDatabase(spec: {
+  name: string;
+  /** An existing role… */
+  owner?: string;
+  /** …or a login user created for it in the same step. */
+  newOwner?: { name: string; password: string };
+}): Promise<{ owner: string }> {
+  return request('/postgres/databases', { method: 'POST', body: json(spec) });
+}
+
+export function postgresSetDatabaseOwner(db: string, owner: string): Promise<void> {
+  return request(`/postgres/databases/${encodeURIComponent(db)}/owner`, { method: 'POST', body: json({ owner }) });
+}
+
+export function postgresDeleteDatabase(db: string, confirm: string): Promise<void> {
+  return request(`/postgres/databases/${encodeURIComponent(db)}/delete`, { method: 'POST', body: json({ confirm }) });
 }
 
 export function postgresSchemas(db: string): Promise<{ schemas: string[] }> {
@@ -892,6 +947,19 @@ export interface TransferTarget {
   user: string;
   password: string;
   sslmode?: 'prefer' | 'require' | 'disable';
+  /** Reach the target's PostgreSQL through SSH, when its port isn't open to this server. */
+  ssh?: TransferSshTunnel;
+}
+
+export interface TransferSshTunnel {
+  enabled: boolean;
+  host: string;
+  port: number;
+  username: string;
+  password: string;
+  /** Where PostgreSQL listens as seen from the target itself (normally 127.0.0.1:5432). */
+  dbHost: string;
+  dbPort: number;
 }
 
 export function postgresTransferTest(

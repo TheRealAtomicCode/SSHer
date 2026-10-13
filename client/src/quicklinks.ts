@@ -1,8 +1,10 @@
 import type { ServiceName } from './api';
 
-// Hard-coded config locations, grouped by the service they belong to. The paths are
-// the standard Debian/Ubuntu ones plus what the DeviseHR VPS actually uses; any that
-// don't exist on the connected server are greyed out rather than hidden.
+// Config locations, grouped by the service they belong to. The paths are the standard
+// Debian/Ubuntu ones plus what the DeviseHR VPS actually uses; any that don't exist on
+// the connected server are greyed out rather than hidden. A `{placeholder}` is filled
+// in per server by resolveQuickGroups — PostgreSQL's directory carries its version
+// (/etc/postgresql/17/main), so it can't be written down once.
 
 export interface QuickLink {
   path: string;
@@ -124,7 +126,7 @@ export const QUICK_GROUPS: QuickGroup[] = [
     title: 'PostgreSQL',
     icon: 'fa-hdd',
     accent: 'amber',
-    blurb: 'The database on the host (port 5432). The containers reach it via host.docker.internal.',
+    blurb: 'The database on the host (port {pgPort}). The containers reach it via host.docker.internal.',
     controls: [
       { action: 'reload', label: 'Reload config', icon: 'fa-sync-alt', tone: 'primary' },
       { action: 'restart', label: 'Restart', icon: 'fa-redo', confirm: 'Restart PostgreSQL?\n\nOpen connections drop; the apps reconnect after a few seconds.' },
@@ -133,12 +135,39 @@ export const QUICK_GROUPS: QuickGroup[] = [
     ],
     afterSave: { action: 'reload', label: 'Reload PostgreSQL' },
     links: [
-      { path: '/etc/postgresql/15/main/pg_hba.conf', title: 'pg_hba.conf', what: 'Who may connect from where: the Docker range 172.16.0.0/12, your 156.38.55.198, and a wide-open 0.0.0.0/0 line. Reload after editing.' },
-      { path: '/etc/postgresql/15/main/postgresql.conf', title: 'postgresql.conf', what: 'Server settings — listen_addresses, max_connections, memory. listen_addresses changes need a restart.' },
+      { path: '{pgHba}', title: 'pg_hba.conf', what: 'Who may connect from where and how (the containers come from the Docker range 172.16.0.0/12). Reload after editing — or use PostgreSQL → Logins, which checks the file first.' },
+      { path: '{pgConf}', title: 'postgresql.conf', what: 'Server settings — listen_addresses, max_connections, memory. listen_addresses changes need a restart.' },
       { path: '/var/log/postgresql', title: 'Logs', what: 'Failed logins and errors — check here when the API says it cannot reach the database.', dir: true },
       { path: '/root/db-backups', title: 'DB backups', what: 'Dumps taken before deploys and migrations.', dir: true },
     ],
   },
 ];
 
-export const ALL_QUICK_PATHS = QUICK_GROUPS.flatMap((g) => g.links.map((l) => l.path));
+/** Values for the `{placeholders}` above, from the connected server. */
+export interface QuickVars {
+  pgHba: string;
+  pgConf: string;
+  pgPort: string;
+}
+
+/** Until the server has answered (or when it has no PostgreSQL), the Debian
+ *  defaults for the current release — shown greyed out if they aren't there. */
+export const DEFAULT_QUICK_VARS: QuickVars = {
+  pgHba: '/etc/postgresql/17/main/pg_hba.conf',
+  pgConf: '/etc/postgresql/17/main/postgresql.conf',
+  pgPort: '5432',
+};
+
+const fill = (text: string, vars: QuickVars) => text.replace(/\{(\w+)\}/g, (m, key: string) => (vars as unknown as Record<string, string>)[key] || m);
+
+export function resolveQuickGroups(vars: QuickVars): QuickGroup[] {
+  return QUICK_GROUPS.map((g) => ({
+    ...g,
+    blurb: fill(g.blurb, vars),
+    links: g.links.map((l) => ({ ...l, path: fill(l.path, vars) })),
+  }));
+}
+
+export function quickPaths(groups: QuickGroup[]): string[] {
+  return groups.flatMap((g) => g.links.map((l) => l.path));
+}

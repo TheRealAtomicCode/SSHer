@@ -420,6 +420,58 @@ export interface PostgresContext {
   error: string;
 }
 
+/** The SSH tunnel to the server's PostgreSQL, opened on the machine running the
+ *  SSHer back end (127.0.0.1 only) for pgAdmin and friends. */
+export interface PostgresTunnel {
+  localPort: number;
+  remoteHost: string;
+  remotePort: number;
+  startedAt: number;
+  /** Connections open through it right now. */
+  active: number;
+  total: number;
+  lastError: string;
+}
+
+export interface PostgresTunnelState {
+  /** The back end runs in a container — its 127.0.0.1 isn't this computer's. */
+  inContainer: boolean;
+  /** This session's SSH login — what pgAdmin's own SSH Tunnel tab asks for. */
+  ssh: { host: string; port: number; username: string };
+  /** The port PostgreSQL listens on, on the server. */
+  postgresPort: number;
+  bindHost: string;
+  defaultLocalPort: number;
+  tunnel: PostgresTunnel | null;
+}
+
+/** One parsed line of pg_hba.conf, as PostgreSQL itself reads it (pg_hba_file_rules). */
+export interface PgHbaRule {
+  file_name: string | null;
+  line_number: number | null;
+  type: string | null;
+  database: string[] | null;
+  user_name: string[] | null;
+  address: string | null;
+  netmask: string | null;
+  auth_method: string | null;
+  /** Set when PostgreSQL would reject this line. */
+  error: string | null;
+}
+
+export interface PgHbaState {
+  path: string;
+  /** The port of the cluster SSHer manages (psql's default one). */
+  port: number;
+  /** SHOW listen_addresses — 'localhost' means containers can't reach it. */
+  listenAddresses: string;
+  hasDocker: boolean;
+  rules: PgHbaRule[];
+  clusters: { version: string; name: string; port: number; online: boolean }[];
+  /** `docker ps` lines that look like a PostgreSQL. */
+  containers: string[];
+}
+
 export interface PostgresRole {
   name: string;
   superuser: boolean;

@@ -71,7 +71,16 @@ const form = reactive({
   ifExists: 'stop' as 'stop' | 'replace',
   sslmode: 'prefer' as 'prefer' | 'require' | 'disable',
 });
+/** The target's SSH login, for a PostgreSQL that only listens on the target's own 127.0.0.1. */
+const ssh = reactive({ enabled: false, host: '', port: 22, username: '', password: '', dbHost: '127.0.0.1', dbPort: 5432 });
 const showPassword = ref(false);
+const showSshPassword = ref(false);
+
+// The same server either way — carry the address across when the switch flips.
+watch(() => ssh.enabled, (on) => {
+  if (on && !ssh.host) ssh.host = form.host.trim();
+  if (!on && !form.host) form.host = ssh.host;
+});
 const testing = ref(false);
 const test = ref<{ ok: boolean; message: string; exists?: boolean; canCreateDb?: boolean; versions?: string } | null>(null);
 const log = ref<{ title: string; steps: StepResult[]; running: boolean; error: string } | null>(null);
@@ -80,10 +89,30 @@ const log = ref<{ title: string; steps: StepResult[]; running: boolean; error: s
 watch(selected, (db, old) => {
   if (!form.targetDb || form.targetDb === old) form.targetDb = db;
 }, { immediate: true });
-watch(() => [form.host, form.port, form.user, form.password, form.targetDb, form.sslmode], () => (test.value = null));
+watch(() => [form.host, form.port, form.user, form.password, form.targetDb, form.sslmode, { ...ssh }], () => (test.value = null), { deep: true });
 
-const ready = computed(() => selected.value && form.host.trim() && form.user.trim() && form.password && form.targetDb.trim());
-const target = () => ({ host: form.host.trim(), port: Number(form.port) || 5432, user: form.user.trim(), password: form.password, sslmode: form.sslmode });
+const ready = computed(
+  () =>
+    selected.value &&
+    form.user.trim() &&
+    form.password &&
+    form.targetDb.trim() &&
+    (ssh.enabled ? ssh.host.trim() && ssh.username.trim() && ssh.password : form.host.trim()),
+);
+const target = () =>
+  ssh.enabled
+    ? {
+        host: ssh.host.trim(),
+        port: Number(ssh.dbPort) || 5432,
+        user: form.user.trim(),
+        password: form.password,
+        sslmode: form.sslmode,
+        ssh: { ...ssh, host: ssh.host.trim(), username: ssh.username.trim(), port: Number(ssh.port) || 22, dbPort: Number(ssh.dbPort) || 5432 },
+      }
+    : { host: form.host.trim(), port: Number(form.port) || 5432, user: form.user.trim(), password: form.password, sslmode: form.sslmode };
+/** How the target reads in messages. */
+const where = () =>
+  ssh.enabled ? `${form.user}@${ssh.host} (SSH tunnel as ${ssh.username} → ${ssh.dbHost}:${ssh.dbPort})` : `${form.user}@${form.host}:${form.port}`;
 
 async function runTest() {
   testing.value = true;
@@ -96,7 +125,7 @@ async function runTest() {
       exists: r.exists,
       canCreateDb: r.canCreateDb,
       versions: `this server PostgreSQL ${r.sourceVersion.split(' ')[0]} → target ${r.targetVersion.split(' ')[0]}${older ? ' — the target is OLDER; restoring into an older version can fail' : ''}`,
-      message: `Connected to ${form.user}@${form.host}:${form.port}.`,
+      message: `Connected to ${where()}.`,
     };
   } catch (err) {
     test.value = { ok: false, message: (err as Error).message };
@@ -111,7 +140,7 @@ async function transfer() {
   const replacing = test.value?.exists && form.ifExists === 'replace';
   const s = summary.value;
   const sure = confirm(
-    `Copy "${selected.value}" to ${t.user}@${t.host}:${t.port} as "${form.targetDb}"?\n\n` +
+    `Copy "${selected.value}" to ${where()} as "${form.targetDb}"?\n\n` +
       (s ? `${s.tables} tables (~${s.rows.toLocaleString()} rows), ${s.functions + s.procedures} functions/procedures, ${s.indexes} indexes, ${s.views + s.matviews} views — ${formatSize(s.bytes)}\n\n` : '') +
       (replacing ? `"${form.targetDb}" ALREADY EXISTS there and will be DELETED first.\n\n` : '') +
       'This server is not changed.',
@@ -201,11 +230,67 @@ const label = 'mb-1.5 block text-xs font-medium text-slate-400';
 
           <section class="space-y-4 rounded-xl border border-slate-800 bg-slate-900/40 p-4">
             <p class="text-[11px] font-medium text-slate-500">2. Where to</p>
-            <p class="rounded-lg border border-sky-900/50 bg-sky-950/20 px-3 py-2 text-xs leading-relaxed text-sky-200/90">
+            <label class="flex cursor-pointer items-start gap-3 rounded-lg border border-slate-800 px-3 py-2.5" :class="ssh.enabled && 'border-emerald-700/60 bg-emerald-950/20'">
+              <input v-model="ssh.enabled" type="checkbox" class="mt-0.5 accent-emerald-500" />
+              <span class="text-xs">
+                <span class="font-medium text-white">Connect through an SSH tunnel</span>
+                <span class="mt-0.5 block text-slate-400">
+                  For a target whose PostgreSQL port is closed (listens on its own 127.0.0.1 only). SSHer logs in to the target over SSH and
+                  carries the connection there — no firewall port or pg_hba change for this server's IP.
+                </span>
+              </span>
+            </label>
+
+            <p v-if="!ssh.enabled" class="rounded-lg border border-sky-900/50 bg-sky-950/20 px-3 py-2 text-xs leading-relaxed text-sky-200/90">
               <b>This server connects to the target</b>, so the target's PostgreSQL port must accept this server's IP (its
-              firewall and pg_hba.conf) — not your browser's.
+              firewall and pg_hba.conf) — not your browser's. If it doesn't, turn on the SSH tunnel above.
             </p>
-            <div class="grid grid-cols-[1fr_6rem] gap-3">
+
+            <template v-if="ssh.enabled">
+              <p class="text-[11px] font-medium text-slate-500">SSH login to the target</p>
+              <div class="grid grid-cols-[1fr_6rem] gap-3">
+                <div>
+                  <label :class="label">Target server IP / hostname</label>
+                  <input v-model="ssh.host" placeholder="102.203.201.222" autocomplete="off" :class="[field, 'font-mono']" />
+                </div>
+                <div>
+                  <label :class="label">SSH port</label>
+                  <input v-model.number="ssh.port" type="number" min="1" max="65535" :class="field" />
+                </div>
+              </div>
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label :class="label">SSH username</label>
+                  <input v-model="ssh.username" placeholder="your login on that server" autocomplete="off" :class="[field, 'font-mono']" />
+                </div>
+                <div>
+                  <label :class="label">SSH password</label>
+                  <div class="relative">
+                    <input v-model="ssh.password" :type="showSshPassword ? 'text' : 'password'" autocomplete="new-password" :class="[field, 'pr-9']" />
+                    <button type="button" tabindex="-1" class="absolute top-1/2 right-2 -translate-y-1/2 text-slate-500 hover:text-white" @click="showSshPassword = !showSshPassword">
+                      <v-icon :name="showSshPassword ? 'fa-eye-slash' : 'fa-eye'" scale="0.75" />
+                    </button>
+                  </div>
+                </div>
+              </div>
+              <div class="grid grid-cols-[1fr_6rem] gap-3">
+                <div>
+                  <label :class="label">PostgreSQL host, as seen from the target</label>
+                  <input v-model="ssh.dbHost" autocomplete="off" :class="[field, 'font-mono']" />
+                </div>
+                <div>
+                  <label :class="label">Its port</label>
+                  <input v-model.number="ssh.dbPort" type="number" min="1" max="65535" :class="field" />
+                </div>
+              </div>
+              <p class="-mt-2 text-[11px] text-slate-500">
+                Normally 127.0.0.1 and 5432 — or 5433 for a second cluster (PostgreSQL → Logins on the target shows its port). The target's pg_hba
+                needs <span class="font-mono">host … 127.0.0.1/32 scram-sha-256</span>, which Debian has by default.
+              </p>
+              <p class="text-[11px] font-medium text-slate-500">PostgreSQL login on the target</p>
+            </template>
+
+            <div v-if="!ssh.enabled" class="grid grid-cols-[1fr_6rem] gap-3">
               <div>
                 <label :class="label">Target server IP / hostname</label>
                 <input v-model="form.host" placeholder="203.0.113.10" autocomplete="off" :class="[field, 'font-mono']" />
