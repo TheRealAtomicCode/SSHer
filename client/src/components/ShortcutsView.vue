@@ -7,6 +7,7 @@ import type { Shortcut } from '../types';
 const props = defineProps<{ shortcuts: Shortcut[] }>();
 const emit = defineEmits<{
   open: [Shortcut];
+  reveal: [Shortcut];
   edit: [Shortcut];
   remove: [Shortcut];
   add: [];
@@ -119,6 +120,13 @@ function dropOn(target: Shortcut) {
             class="absolute top-2 right-2 flex gap-0.5 opacity-0 transition group-hover:opacity-100"
             @click.stop
           >
+            <button
+              title="Open in folder"
+              class="rounded p-1.5 text-slate-500 hover:bg-slate-800 hover:text-white"
+              @click="emit('reveal', s)"
+            >
+              <v-icon name="fa-folder-open" scale="0.65" />
+            </button>
             <button
               title="Copy path"
               class="rounded p-1.5 text-slate-500 hover:bg-slate-800 hover:text-white"

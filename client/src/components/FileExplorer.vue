@@ -99,7 +99,11 @@ async function run(action: () => Promise<void>, success?: string) {
   }
 }
 
+/** True once a real folder has been listed — until then `cwd` is a placeholder "/". */
+const listed = ref(false);
+
 function applyListing(listing: Listing) {
+  listed.value = true;
   cwd.value = listing.path;
   parent.value = listing.parent;
   files.value = listing.files;
@@ -166,7 +170,33 @@ async function openPath(path: string, isDirectory: boolean) {
   }
 }
 
-defineExpose({ openPath, cwd });
+/** "Open in folder": shows the folder holding `path` with it selected, file or folder. */
+async function revealPath(path: string) {
+  loadedOnce = true;
+  const clean = path.replace(/(.)\/+$/, '$1');
+  const dir = dirname(clean);
+  if (dir === clean) {
+    await load(clean);
+    return;
+  }
+  loading.value = true;
+  try {
+    applyListing(await api.list(dir));
+    const hit = files.value.find((f) => f.path === clean || f.name === basename(clean));
+    if (hit) {
+      selectedPaths.value = new Set([hit.path]);
+      anchor.value = files.value.indexOf(hit);
+    } else {
+      notify(`${basename(clean)} isn't in ${dir} (it may have been removed)`, 'error');
+    }
+  } catch (err) {
+    fail(err);
+  } finally {
+    loading.value = false;
+  }
+}
+
+defineExpose({ openPath, revealPath, cwd, listed });
 
 // Uploads follow you around, defaulting to an `uploads` folder in the current
 // directory. `immediate` matters: when the home directory is `/`, cwd never

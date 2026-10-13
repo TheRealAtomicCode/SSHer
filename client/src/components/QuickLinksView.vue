@@ -9,7 +9,7 @@ import PromptDialog from './PromptDialog.vue';
 import QuickLinkMenu from './QuickLinkMenu.vue';
 import TextEditor from './TextEditor.vue';
 
-const emit = defineEmits<{ openPath: [{ path: string; isDirectory: boolean }] }>();
+const emit = defineEmits<{ openPath: [{ path: string; isDirectory: boolean; reveal?: boolean }] }>();
 
 const status = ref<Record<string, string>>({});
 const found = ref<Record<string, 'file' | 'dir'> | null>(null);

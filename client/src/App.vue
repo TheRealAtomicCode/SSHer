@@ -3,11 +3,16 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import * as api from './api';
 import ActivityLogPanel from './components/ActivityLogPanel.vue';
 import ConnectPanel from './components/ConnectPanel.vue';
+import DbTransferView from './components/DbTransferView.vue';
 import DockerView from './components/DockerView.vue';
 import DotNetView from './components/DotNetView.vue';
 import FileExplorer from './components/FileExplorer.vue';
 import HomeView from './components/HomeView.vue';
 import LogsView from './components/LogsView.vue';
+import MonitorView from './components/MonitorView.vue';
+import SecurityView from './components/SecurityView.vue';
+import { resetMyIps } from './privacy';
+import { parseRoute, routeToHash, type Route } from './router';
 import NginxView from './components/NginxView.vue';
 import PgBackRestView from './components/PgBackRestView.vue';
 import PortsView from './components/PortsView.vue';
@@ -21,6 +26,8 @@ import UsersView from './components/UsersView.vue';
 import { copyToClipboard } from './files';
 import * as prefs from './prefs';
 import { sudoMode, toggleSudoMode } from './sudoMode';
+import { askForSudoPassword, sudoPrompt } from './sudoPrompt';
+import SudoPasswordDialog from './components/SudoPasswordDialog.vue';
 import { dismiss, fail, notify, sessionState, toasts } from './toast';
 import type { Credentials, Session, Shortcut, View } from './types';
 
@@ -35,6 +42,8 @@ const connectError = ref('');
 const view = ref<View>('home');
 /** Which container the Logs page opens on, when jumping there from the Docker page. */
 const logsFor = ref('');
+/** The database the Transfer page has selected (#/dbtransfer/<db>). */
+const transferDb = ref('');
 const isFullscreen = ref(false);
 const activityOpen = ref(false);
 const terminalOpen = ref(false);
@@ -74,10 +83,13 @@ function removeShortcut(entry: Shortcut) {
   persistShortcuts(shortcuts.value.filter((s) => s.id !== entry.id));
 }
 
-async function openShortcut(entry: { path: string; isDirectory: boolean }) {
+/** `reveal` = "open in folder": show the containing folder with the item selected,
+ *  instead of opening the item itself. */
+async function openShortcut(entry: { path: string; isDirectory: boolean; reveal?: boolean }) {
   view.value = 'files';
   await nextTick();
-  await explorer.value?.openPath(entry.path, entry.isDirectory);
+  if (entry.reveal) await explorer.value?.revealPath(entry.path);
+  else await explorer.value?.openPath(entry.path, entry.isDirectory);
 }
 
 // ------------------------------------------------------------------ session
@@ -86,19 +98,53 @@ async function onConnect(credentials: Credentials, opts: { remember: boolean; la
   connecting.value = true;
   connectError.value = '';
   try {
-    session.value = await api.connect(credentials);
-    prefs.rememberServer({ ...credentials, label: opts.label || undefined }, opts.remember);
+    // A remembered sudo password goes along so the server can try it first.
+    const saved = prefs.savedServers().find((s) => s.id === prefs.serverId(credentials));
+    const opened = await api.connect({ ...credentials, sudoPassword: saved?.sudoPassword });
+    sudoPrompt.savedRejected = Boolean(opened.sudoSavedRejected);
+    if (opened.sudoSavedRejected) notify("Your saved sudo password didn't work — you'll be asked for it when needed", 'error');
+    session.value = opened;
+    otpLogin.value = null;
+    // The code is one-time: never saved with the server.
+    const { sudoPassword: _sudo, otp: _otp, ...login } = credentials;
+    prefs.rememberServer({ ...login, label: opts.label || undefined }, opts.remember);
     view.value = 'home';
   } catch (err) {
-    connectError.value = (err as Error).message;
+    if (err instanceof api.ApiError && err.payload.otpRequired) {
+      // Two-factor server: ask for the authenticator code, then log in again.
+      otpLogin.value = {
+        credentials,
+        opts,
+        code: '',
+        error: credentials.otp ? "That code wasn't accepted — wait for the next one in your app and try again." : '',
+      };
+    } else {
+      connectError.value = (err as Error).message;
+    }
   } finally {
     connecting.value = false;
   }
 }
 
+/** A login waiting for its authenticator code. */
+const otpLogin = ref<{
+  credentials: Credentials;
+  opts: { remember: boolean; label: string };
+  code: string;
+  error: string;
+} | null>(null);
+
+function submitOtp() {
+  const pending = otpLogin.value;
+  if (!pending || !/^\d{6,8}$/.test(pending.code.trim())) return;
+  onConnect({ ...pending.credentials, otp: pending.code.trim() }, pending.opts);
+}
+
 async function onDisconnect() {
   await api.disconnect().catch(() => {});
   session.value = null;
+  // A different server can mean a different network path, so learn "my IP" again.
+  resetMyIps();
 }
 
 watch(
@@ -149,6 +195,82 @@ async function submitAccessKey() {
   }
 }
 
+// Any request that fails with "sudo: a password is required" waits on this prompt,
+// then retries once the password is accepted.
+api.onSudoPasswordNeeded((reason) => (session.value ? askForSudoPassword(reason) : Promise.resolve(false)));
+
+// ------------------------------------------------------------------ routing
+//
+// The URL hash mirrors where you are (see router.ts), so Back/Forward move around inside
+// SSHer instead of leaving the site, and a link or reload lands on the same page.
+
+/** The Docker page's open container + tab, as the URL has it. */
+const dockerRoute = ref<{ container?: string; tab?: string }>({});
+let applyingRoute = false;
+/** A route from the URL that arrived before there was a session to show it in. */
+let pendingRoute: Route | null = parseRoute(location.hash);
+
+const currentHash = computed(() =>
+  routeToHash({
+    view: view.value,
+    path: view.value === 'files' ? explorer.value?.cwd : undefined,
+    container:
+      view.value === 'docker'
+        ? dockerRoute.value.container
+        : view.value === 'logs'
+          ? logsFor.value || undefined
+          : view.value === 'dbtransfer'
+            ? transferDb.value || undefined
+            : undefined,
+    tab: view.value === 'docker' ? dockerRoute.value.tab : undefined,
+  }),
+);
+
+watch(currentHash, (hash) => {
+  if (!session.value || applyingRoute || hash === location.hash) return;
+  // The explorer's "/" before its first listing is a placeholder, not a place.
+  if (view.value === 'files' && !explorer.value?.listed) return;
+  history.pushState(null, '', hash);
+});
+
+function applyRoute(r: Route) {
+  applyingRoute = true;
+  // Before switching view, so the explorer doesn't first load the home folder.
+  if (r.view === 'files' && r.path) explorer.value?.openPath(r.path, true);
+  if (r.view === 'docker') dockerRoute.value = { container: r.container, tab: r.tab };
+  if (r.view === 'logs' && r.container) logsFor.value = r.container;
+  if (r.view === 'dbtransfer' && r.container) transferDb.value = r.container;
+  view.value = r.view;
+  nextTick(() => (applyingRoute = false));
+}
+
+function onPopState() {
+  const r = parseRoute(location.hash) ?? { view: 'home' as View };
+  if (!session.value) {
+    pendingRoute = r;
+    return;
+  }
+  applyRoute(r);
+}
+
+watch(session, (s, old) => {
+  if (!s || old) return;
+  // The panels mount with the session; route once they exist.
+  nextTick(() => {
+    if (pendingRoute) {
+      const r = pendingRoute;
+      pendingRoute = null;
+      applyRoute(r);
+      history.replaceState(null, '', routeToHash(r));
+    } else {
+      history.replaceState(null, '', currentHash.value);
+    }
+  });
+});
+
+onMounted(() => window.addEventListener('popstate', onPopState));
+onUnmounted(() => window.removeEventListener('popstate', onPopState));
+
 onMounted(async () => {
   document.addEventListener('fullscreenchange', onFullscreenChange);
   if (!(await checkAccess())) return;
@@ -162,6 +284,7 @@ onUnmounted(() => {
 
 const NAV: { view: View; label: string; icon: string; sub?: boolean }[] = [
   { view: 'home', label: 'Overview', icon: 'fa-th-large' },
+  { view: 'monitor', label: 'Monitoring', icon: 'fa-chart-line' },
   { view: 'files', label: 'File Explorer', icon: 'fa-folder-open' },
   { view: 'shortcuts', label: 'Shortcuts', icon: 'fa-star', sub: true },
   { view: 'links', label: 'Quick Links', icon: 'fa-link' },
@@ -172,7 +295,9 @@ const NAV: { view: View; label: string; icon: string; sub?: boolean }[] = [
   { view: 'docker', label: 'Docker', icon: 'fa-docker' },
   { view: 'logs', label: 'Container logs', icon: 'fa-terminal', sub: true },
   { view: 'ports', label: 'Ports & Firewall', icon: 'fa-shield-alt' },
+  { view: 'security', label: 'Security', icon: 'fa-bug' },
   { view: 'postgres', label: 'PostgreSQL', icon: 'fa-database' },
+  { view: 'dbtransfer', label: 'Transfer database', icon: 'fa-arrow-right', sub: true },
   { view: 'backups', label: 'Backups', icon: 'fa-save', sub: true },
 ];
 </script>
@@ -317,6 +442,10 @@ const NAV: { view: View; label: string; icon: string; sub?: boolean }[] = [
 
       <!-- Main -->
       <main class="flex min-w-0 flex-1 flex-col">
+        <MonitorView v-if="view === 'monitor'" @open-path="openShortcut" />
+
+        <SecurityView v-if="view === 'security'" @navigate="(v: View) => (view = v)" @open-path="openShortcut" />
+
         <HomeView
           v-if="view === 'home'"
           :session="session"
@@ -338,6 +467,7 @@ const NAV: { view: View; label: string; icon: string; sub?: boolean }[] = [
           v-if="view === 'shortcuts'"
           :shortcuts="shortcuts"
           @open="openShortcut"
+          @reveal="(s: Shortcut) => openShortcut({ path: s.path, isDirectory: s.isDirectory, reveal: true })"
           @edit="(s: Shortcut) => (shortcutDraft = { ...s })"
           @remove="removeShortcut"
           @add="shortcutDraft = { path: explorer?.cwd ?? session.home, isDirectory: true, name: '' }"
@@ -358,17 +488,70 @@ const NAV: { view: View; label: string; icon: string; sub?: boolean }[] = [
           v-if="view === 'docker'"
           :session="session"
           @open-path="openShortcut"
+          :route="dockerRoute"
+          @route="(r) => (dockerRoute = r)"
           @open-logs="(name: string) => { logsFor = name; view = 'logs'; }"
         />
 
-        <LogsView v-if="view === 'logs'" :initial="logsFor" @open-path="openShortcut" />
+        <LogsView v-if="view === 'logs'" :initial="logsFor" @open-path="openShortcut" @select="(n: string) => (logsFor = n)" />
 
         <PortsView v-if="view === 'ports'" :session="session" />
 
-        <PostgresView v-if="view === 'postgres'" />
+        <PostgresView v-if="view === 'postgres'" @navigate="(v: View) => (view = v)" />
 
-        <PgBackRestView v-if="view === 'backups'" />
+        <DbTransferView
+          v-if="view === 'dbtransfer'"
+          :initial="transferDb"
+          @select="(db: string) => (transferDb = db)"
+          @navigate="(v: View) => (view = v)"
+        />
+
+        <PgBackRestView v-if="view === 'backups'" @open-path="openShortcut" />
       </main>
+    </div>
+
+    <SudoPasswordDialog v-if="sudoPrompt.open && session" :session="session" />
+
+    <!-- Two-factor login: the server asked for the authenticator code -->
+    <div
+      v-if="otpLogin && !session"
+      data-modal
+      class="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-sm"
+    >
+      <form
+        class="w-full max-w-sm rounded-xl border border-emerald-700/50 bg-slate-900 p-5 shadow-2xl"
+        @submit.prevent="submitOtp"
+        @keydown.esc="otpLogin = null"
+      >
+        <h2 class="flex items-center gap-2 font-semibold text-white">
+          <v-icon name="fa-shield-alt" class="text-emerald-400" /> Verification code
+        </h2>
+        <p class="mt-1 text-sm text-slate-400">
+          <span class="font-mono text-slate-200">{{ otpLogin.credentials.username }}@{{ otpLogin.credentials.host }}</span>
+          uses two-factor login. Open your authenticator app and type the 6-digit code.
+        </p>
+        <input
+          v-model="otpLogin.code"
+          autofocus
+          inputmode="numeric"
+          autocomplete="one-time-code"
+          maxlength="8"
+          placeholder="123456"
+          class="mt-4 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-3 text-center font-mono text-2xl tracking-[0.4em] text-white focus:border-emerald-500 focus:outline-none"
+        />
+        <p class="mt-1 text-[11px] text-slate-500">Lost your phone? A backup (scratch) code works here too — each one once.</p>
+        <p v-if="otpLogin.error" class="mt-3 rounded-lg border border-red-900/50 bg-red-950/50 px-3 py-2 text-sm text-red-300">{{ otpLogin.error }}</p>
+        <div class="mt-5 flex justify-end gap-2">
+          <button type="button" class="rounded-lg px-3 py-2 text-sm text-slate-400 hover:bg-slate-800 hover:text-white" @click="otpLogin = null">Cancel</button>
+          <button
+            type="submit"
+            :disabled="connecting || !/^\d{6,8}$/.test(otpLogin.code.trim())"
+            class="flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-500 disabled:opacity-40"
+          >
+            <v-icon v-if="connecting" name="fa-spinner" class="animate-spin" scale="0.8" /> Log in
+          </button>
+        </div>
+      </form>
     </div>
 
     <ShortcutDialog

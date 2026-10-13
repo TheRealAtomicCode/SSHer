@@ -5,7 +5,7 @@ import { copyToClipboard } from '../files';
 import { fail, notify } from '../toast';
 
 const props = defineProps<{ container: string; compact?: boolean }>();
-const emit = defineEmits<{ openPath: [{ path: string; isDirectory: boolean }] }>();
+const emit = defineEmits<{ openPath: [{ path: string; isDirectory: boolean; reveal?: boolean }] }>();
 
 const raw = ref('');
 const loading = ref(false);
@@ -154,11 +154,14 @@ const ctl = 'rounded-md border border-slate-700 px-2 py-1 text-[11px] text-slate
       <button :class="ctl" title="Download everything fetched so far as a .log file" @click="downloadLog">
         <v-icon name="fa-download" scale="0.6" />
       </button>
+      <button v-if="logPath" :class="ctl" :title="`Open ${logPath}`" @click="openLogFile">
+        <v-icon name="fa-file-alt" scale="0.6" />
+      </button>
       <button
         v-if="logPath"
         :class="ctl"
-        :title="`Open ${logPath} in the File Explorer`"
-        @click="openLogFile"
+        :title="`Show ${logPath} in its folder`"
+        @click="emit('openPath', { path: logPath, isDirectory: false, reveal: true })"
       >
         <v-icon name="fa-folder-open" scale="0.6" />
       </button>

@@ -1,8 +1,97 @@
 <script setup lang="ts">
-import type { Session, Shortcut, View } from '../types';
+import { computed, onMounted, onUnmounted, ref } from 'vue';
+import * as api from '../api';
+import type { SecurityFinding } from '../api';
+import { formatSize } from '../files';
+import type { DiskUsage, MonitorSample, Session, Shortcut, View } from '../types';
 
-defineProps<{ session: Session; shortcuts: Shortcut[] }>();
+const props = defineProps<{ session: Session; shortcuts: Shortcut[] }>();
 const emit = defineEmits<{ navigate: [View]; openShortcut: [Shortcut] }>();
+
+/** Free space on each real filesystem — the first thing to check when things fail oddly. */
+const disks = ref<DiskUsage[]>([]);
+onMounted(async () => {
+  disks.value = (await api.systemDisk().catch(() => ({ disks: [] }))).disks;
+});
+const usedPct = (d: DiskUsage) => (d.size ? Math.round((d.used / d.size) * 100) : 0);
+
+// ------------------------------------------------------ live numbers (monitoring)
+
+const sample = ref<MonitorSample | null>(null);
+const live = ref<{ cpu: number; rx: number; tx: number } | null>(null);
+let timer: ReturnType<typeof setTimeout> | undefined;
+let stopped = false;
+
+async function tick() {
+  try {
+    const s = await api.monitorSample();
+    const p = sample.value;
+    if (p && s.time > p.time) {
+      const dt = (s.time - p.time) / 1000;
+      const dTotal = s.cpu.total - p.cpu.total;
+      // Real interfaces only — virtual ones (docker, veth…) would double-count.
+      const sum = (x: MonitorSample, k: 'rx' | 'tx') => x.network.filter((n) => !n.virtual).reduce((a, n) => a + n[k], 0);
+      live.value = {
+        cpu: dTotal > 0 ? (1 - (s.cpu.idle - p.cpu.idle) / dTotal) * 100 : 0,
+        rx: Math.max(0, (sum(s, 'rx') - sum(p, 'rx')) / dt),
+        tx: Math.max(0, (sum(s, 'tx') - sum(p, 'tx')) / dt),
+      };
+    }
+    sample.value = s;
+  } catch {
+    /* the numbers just pause */
+  }
+  if (!stopped) timer = setTimeout(tick, 3000);
+}
+onMounted(tick);
+onUnmounted(() => {
+  stopped = true;
+  clearTimeout(timer);
+});
+
+const memUsed = computed(() => (sample.value ? sample.value.memory.total - sample.value.memory.available : 0));
+const memPct = computed(() => (sample.value?.memory.total ? (memUsed.value / sample.value.memory.total) * 100 : 0));
+const rate = (b: number) => `${formatSize(Math.round(b))}/s`;
+const barTone = (pct: number) => (pct > 90 ? 'bg-red-500' : pct > 75 ? 'bg-amber-500' : 'bg-sky-500');
+
+// ---------------------------------------------------------------- security
+
+/** One scan per server per 5 minutes, kept across visits to the home page. */
+const scanCache: Map<string, { time: number; findings: SecurityFinding[] }> = ((globalThis as Record<string, unknown>).__ssherScanCache ??= new Map()) as Map<string, { time: number; findings: SecurityFinding[] }>;
+const findings = ref<SecurityFinding[] | null>(null);
+const scanning = ref(false);
+const scannedAt = ref<number | null>(null);
+
+async function scan(force = false) {
+  const key = `${props.session.username}@${props.session.host}:${props.session.port}`;
+  const cached = scanCache.get(key);
+  if (!force && cached && Date.now() - cached.time < 5 * 60_000) {
+    findings.value = cached.findings;
+    scannedAt.value = cached.time;
+    return;
+  }
+  scanning.value = true;
+  try {
+    const r = await api.securityScan();
+    scanCache.set(key, { time: r.time, findings: r.findings });
+    findings.value = r.findings;
+    scannedAt.value = r.time;
+  } catch {
+    findings.value = findings.value ?? [];
+  } finally {
+    scanning.value = false;
+  }
+}
+onMounted(() => scan());
+
+const SEV = [
+  { key: 'critical', label: 'Critical', icon: 'fa-times-circle', color: '#d03b3b' },
+  { key: 'high', label: 'High', icon: 'fa-exclamation-triangle', color: '#ec835a' },
+  { key: 'medium', label: 'Medium', icon: 'fa-exclamation-triangle', color: '#fab219' },
+  { key: 'low', label: 'Low', icon: 'fa-info-circle', color: '#94a3b8' },
+] as const;
+const count = (sev: string) => findings.value?.filter((f) => f.severity === sev).length ?? 0;
+const worst = computed(() => (findings.value ?? []).filter((f) => f.severity === 'critical' || f.severity === 'high').slice(0, 4));
 
 const TILES: { view: View; title: string; text: string; icon: string; tone: string }[] = [
   {
@@ -11,6 +100,20 @@ const TILES: { view: View; title: string; text: string; icon: string; tone: stri
     text: 'Browse, edit, upload and move files over SFTP.',
     icon: 'fa-folder-open',
     tone: 'from-amber-500/20 text-amber-300 ring-amber-500/30',
+  },
+  {
+    view: 'monitor',
+    title: 'Monitoring',
+    text: 'Live CPU, memory, disk and network — every second if you like — plus every connection and HTTP request.',
+    icon: 'fa-chart-line',
+    tone: 'from-sky-500/20 text-sky-300 ring-sky-500/30',
+  },
+  {
+    view: 'security',
+    title: 'Security',
+    text: 'Scan for malware, exposed services and weak settings — and fix them, with optional tools like Lynis and ClamAV.',
+    icon: 'fa-bug',
+    tone: 'from-red-500/20 text-red-300 ring-red-500/30',
   },
   {
     view: 'links',
@@ -87,6 +190,93 @@ const TILES: { view: View; title: string; text: string; icon: string; tone: stri
       <p class="text-sm text-slate-500">
         Logged in as {{ session.username }} · home {{ session.home }} · port {{ session.port }}
       </p>
+
+      <div v-if="disks.length" class="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        <div v-for="d in disks" :key="d.mount" class="rounded-xl border border-slate-800 bg-slate-900/50 p-4">
+          <div class="flex items-baseline justify-between gap-2">
+            <p class="truncate text-xs text-slate-400"><v-icon name="fa-hdd" scale="0.7" /> <span class="font-mono">{{ d.mount }}</span></p>
+            <p class="text-[10px] text-slate-600">{{ d.fstype }}</p>
+          </div>
+          <p class="mt-1 text-lg font-semibold" :class="usedPct(d) > 90 ? 'text-red-300' : 'text-white'">
+            {{ formatSize(d.avail) }} free <span class="text-xs font-normal text-slate-500">of {{ formatSize(d.size) }}</span>
+          </p>
+          <div class="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-800">
+            <div
+              class="h-full rounded-full"
+              :class="usedPct(d) > 90 ? 'bg-red-500' : usedPct(d) > 75 ? 'bg-amber-500' : 'bg-emerald-500'"
+              :style="{ width: `${usedPct(d)}%` }"
+            />
+          </div>
+          <p class="mt-1 text-[10px] text-slate-600">{{ usedPct(d) }}% used · {{ formatSize(d.used) }}</p>
+        </div>
+      </div>
+
+      <div class="mt-5 grid gap-4 lg:grid-cols-[3fr_2fr]">
+        <!-- Monitoring, live -->
+        <button
+          class="rounded-2xl border border-slate-800 bg-slate-900/50 p-4 text-left transition hover:border-sky-700/60"
+          title="Open Monitoring"
+          @click="emit('navigate', 'monitor')"
+        >
+          <p class="mb-3 flex items-center gap-2 text-sm font-semibold text-white">
+            <v-icon name="fa-chart-line" scale="0.8" class="text-sky-300" /> Monitoring
+            <span class="flex items-center gap-1 text-[10px] font-normal text-emerald-400"><span class="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" /> live</span>
+            <span class="ml-auto text-[11px] font-normal text-slate-500">Open →</span>
+          </p>
+          <div class="grid grid-cols-3 gap-3">
+            <div>
+              <p class="text-[11px] text-slate-500">CPU</p>
+              <p class="text-xl font-semibold text-white tabular-nums">{{ live ? `${live.cpu.toFixed(live.cpu < 10 ? 1 : 0)}%` : '…' }}</p>
+              <div class="mt-1 h-1 overflow-hidden rounded-full bg-slate-800">
+                <div class="h-full rounded-full transition-all" :class="barTone(live?.cpu ?? 0)" :style="{ width: `${Math.min(100, live?.cpu ?? 0)}%` }" />
+              </div>
+              <p class="mt-1 text-[10px] text-slate-600">load {{ sample?.load[0].toFixed(2) ?? '…' }} · {{ sample?.cpu.cores ?? '?' }} cores</p>
+            </div>
+            <div>
+              <p class="text-[11px] text-slate-500">Memory</p>
+              <p class="text-xl font-semibold text-white tabular-nums">{{ sample ? formatSize(memUsed) : '…' }}</p>
+              <div class="mt-1 h-1 overflow-hidden rounded-full bg-slate-800">
+                <div class="h-full rounded-full transition-all" :class="barTone(memPct)" :style="{ width: `${memPct}%` }" />
+              </div>
+              <p class="mt-1 text-[10px] text-slate-600">of {{ sample ? formatSize(sample.memory.total) : '…' }}</p>
+            </div>
+            <div>
+              <p class="text-[11px] text-slate-500">Network</p>
+              <p class="text-sm font-semibold text-white tabular-nums">↓ {{ live ? rate(live.rx) : '…' }}</p>
+              <p class="text-sm text-slate-300 tabular-nums">↑ {{ live ? rate(live.tx) : '…' }}</p>
+            </div>
+          </div>
+        </button>
+
+        <!-- Security summary -->
+        <div class="rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
+          <p class="mb-3 flex items-center gap-2 text-sm font-semibold text-white">
+            <v-icon name="fa-bug" scale="0.8" class="text-red-300" /> Security
+            <span v-if="scannedAt" class="text-[10px] font-normal text-slate-500">checked {{ new Date(scannedAt).toLocaleTimeString() }}</span>
+            <button class="ml-auto text-[11px] font-normal text-slate-500 hover:text-white" :disabled="scanning" @click="scan(true)">
+              <v-icon name="fa-sync-alt" scale="0.55" :class="scanning && 'animate-spin'" /> Rescan
+            </button>
+          </p>
+          <p v-if="findings === null" class="py-4 text-center text-xs text-slate-500"><v-icon name="fa-spinner" class="animate-spin" /> Scanning…</p>
+          <template v-else>
+            <div class="flex flex-wrap gap-2">
+              <span v-for="s in SEV" :key="s.key" class="flex items-center gap-1.5 rounded-md bg-slate-950/60 px-2 py-1 text-xs">
+                <v-icon :name="s.icon" scale="0.6" :style="{ color: s.color }" />
+                <span class="font-semibold text-white tabular-nums">{{ count(s.key) }}</span>
+                <span class="text-slate-500">{{ s.label }}</span>
+              </span>
+            </div>
+            <ul v-if="worst.length" class="mt-3 space-y-1">
+              <li v-for="f in worst" :key="f.id" class="flex items-start gap-1.5 text-[11px] text-slate-300">
+                <v-icon :name="f.severity === 'critical' ? 'fa-times-circle' : 'fa-exclamation-triangle'" scale="0.55" class="mt-0.5 shrink-0" :style="{ color: f.severity === 'critical' ? '#d03b3b' : '#ec835a' }" />
+                <span class="line-clamp-1">{{ f.title }}</span>
+              </li>
+            </ul>
+            <p v-else class="mt-3 text-[11px] text-emerald-300"><v-icon name="fa-check-circle" scale="0.6" /> Nothing serious found.</p>
+            <button class="mt-3 text-[11px] text-sky-400 hover:text-sky-300" @click="emit('navigate', 'security')">Open Security →</button>
+          </template>
+        </div>
+      </div>
 
       <div class="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <button

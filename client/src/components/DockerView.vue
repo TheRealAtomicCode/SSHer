@@ -6,14 +6,18 @@ import { fail, notify } from '../toast';
 import { newTransferId, watchTransfer } from '../transferProgress';
 import type { ComposeInfo, ComposeOp, Container, DockerImage, RemoteFile, Session, StepResult } from '../types';
 import DeployWizard from './DeployWizard.vue';
+import ContainerNetwork from './ContainerNetwork.vue';
 import LogViewer from './LogViewer.vue';
 import StepLog from './StepLog.vue';
 import TextEditor from './TextEditor.vue';
 
-defineProps<{ session: Session }>();
+/** `route` is the container + tab from the URL (#/docker/<name>/<tab>); the page reports
+ *  its own changes back through the `route` event so Back/Forward work. */
+const props = defineProps<{ session: Session; route?: { container?: string; tab?: string } }>();
 const emit = defineEmits<{
-  openPath: [{ path: string; isDirectory: boolean }];
+  openPath: [{ path: string; isDirectory: boolean; reveal?: boolean }];
   openLogs: [string];
+  route: [{ container?: string; tab?: string }];
 }>();
 
 const tab = ref<'containers' | 'images'>('containers');
@@ -27,7 +31,7 @@ const busy = ref<Set<string>>(new Set());
 const query = ref('');
 
 const selected = ref<Container | null>(null);
-const detailTab = ref<'overview' | 'config' | 'logs' | 'inspect'>('overview');
+const detailTab = ref<'overview' | 'network' | 'config' | 'logs' | 'inspect'>('overview');
 const inspectJson = ref('');
 const revealSecrets = ref(false);
 const editing = ref<RemoteFile | null>(null);
@@ -66,12 +70,36 @@ async function refresh() {
     containers.value = c.containers;
     images.value = i.images;
     if (selected.value) selected.value = c.containers.find((x) => x.id === selected.value!.id) ?? null;
+    applyRoute();
   } catch (err) {
     fail(err);
   } finally {
     loading.value = false;
   }
 }
+
+// ----------------------------------------------------------------- routing
+
+const TABS = ['overview', 'network', 'config', 'logs', 'inspect'] as const;
+
+/** Open (or close) the container panel the URL names. */
+function applyRoute() {
+  const want = props.route?.container;
+  if (!want) {
+    if (selected.value) selected.value = null;
+    return;
+  }
+  const c = containers.value.find((x) => x.name === want);
+  if (!c) return; // not loaded yet, or gone
+  const tab = (TABS as readonly string[]).includes(props.route?.tab ?? '') ? (props.route!.tab as (typeof TABS)[number]) : 'overview';
+  if (selected.value?.name !== c.name) openDetail(c, tab);
+  else if (detailTab.value !== tab) detailTab.value = tab;
+}
+
+watch(() => [props.route?.container, props.route?.tab], applyRoute);
+watch([() => selected.value?.name, detailTab], ([name, t]) => {
+  emit('route', name ? { container: name, tab: t } : {});
+});
 
 const filtered = computed(() => {
   const q = query.value.trim().toLowerCase();
@@ -95,6 +123,16 @@ const groups = computed(() => {
 
 const runningCount = computed(() => containers.value.filter((c) => c.running).length);
 const inUseImages = computed(() => new Set(containers.value.map((c) => c.image)));
+
+/** Images have no folder of their own (they live inside Docker's store), so "open in
+ *  folder" goes to where they're used: the compose project, else a running container's files. */
+function imageFolder(img: DockerImage): string | null {
+  const users = containers.value.filter((c) => c.image === img.ref);
+  const composed = users.find((c) => c.compose?.workingDir);
+  if (composed) return composed.compose!.workingDir;
+  const running = users.find((c) => c.pid);
+  return running ? `/proc/${running.pid}/root` : null;
+}
 
 // ---------------------------------------------------------------- actions
 
@@ -588,6 +626,14 @@ const btn = 'rounded-md p-1.5 text-slate-400 transition hover:bg-slate-800 hover
                     <button class="rounded-md px-2 py-1 text-xs text-sky-300 hover:bg-sky-500/10" @click="wizard = { image: img.ref, source: 'local' }">
                       <v-icon name="fa-rocket" scale="0.65" /> Deploy
                     </button>
+                    <button
+                      :class="btn"
+                      :disabled="!imageFolder(img)"
+                      :title="imageFolder(img) ? `Open ${imageFolder(img)}` : 'No folder: images live inside Docker\'s store. Open a container made from it to browse its files.'"
+                      @click="imageFolder(img) && emit('openPath', { path: imageFolder(img)!, isDirectory: true })"
+                    >
+                      <v-icon name="fa-folder-open" scale="0.7" />
+                    </button>
                     <button :class="btn" title="Delete image" @click="removeImage(img)">
                       <v-icon name="fa-trash-alt" scale="0.7" />
                     </button>
@@ -612,7 +658,7 @@ const btn = 'rounded-md p-1.5 text-slate-400 transition hover:bg-slate-800 hover
       </div>
       <div class="flex gap-1 border-b border-slate-800 px-3 pt-2 text-xs">
         <button
-          v-for="t in (['overview', 'config', 'logs', 'inspect'] as const)"
+          v-for="t in (['overview', 'network', 'config', 'logs', 'inspect'] as const)"
           :key="t"
           class="rounded-t-md border-b-2 px-3 py-1.5 capitalize transition"
           :class="detailTab === t ? 'border-sky-400 text-white' : 'border-transparent text-slate-500 hover:text-slate-300'"
@@ -675,6 +721,35 @@ const btn = 'rounded-md p-1.5 text-slate-400 transition hover:bg-slate-800 hover
             </div>
           </div>
 
+          <div>
+            <p class="mb-1.5 text-xs font-medium text-slate-400">Open in folder</p>
+            <div class="flex flex-wrap gap-1.5">
+              <button
+                v-if="selected.pid"
+                class="rounded-lg border border-slate-700 px-2.5 py-1 text-[11px] text-slate-300 hover:border-sky-500"
+                title="Browse the running container's own filesystem (/proc/<pid>/root)"
+                @click="emit('openPath', { path: `/proc/${selected.pid}/root`, isDirectory: true })"
+              >
+                <v-icon name="fa-folder-open" scale="0.6" /> Container's files
+              </button>
+              <button
+                v-if="selected.compose"
+                class="rounded-lg border border-slate-700 px-2.5 py-1 text-[11px] text-slate-300 hover:border-sky-500"
+                @click="emit('openPath', { path: selected.compose.workingDir, isDirectory: true })"
+              >
+                <v-icon name="fa-folder-open" scale="0.6" /> Compose project
+              </button>
+              <button
+                v-if="selected.logPath"
+                class="rounded-lg border border-slate-700 px-2.5 py-1 text-[11px] text-slate-300 hover:border-sky-500"
+                :title="selected.logPath"
+                @click="emit('openPath', { path: selected.logPath, isDirectory: false, reveal: true })"
+              >
+                <v-icon name="fa-folder-open" scale="0.6" /> Log file
+              </button>
+            </div>
+          </div>
+
           <div class="flex flex-wrap gap-2 border-t border-slate-800 pt-4">
             <template v-if="selected.compose">
               <button class="rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-300 hover:border-sky-500" @click="composeOp(selected.compose, 'recreate', selected)">
@@ -696,6 +771,9 @@ const btn = 'rounded-md p-1.5 text-slate-400 transition hover:bg-slate-800 hover
             </button>
           </div>
         </div>
+
+        <!-- Network -->
+        <ContainerNetwork v-else-if="detailTab === 'network'" :key="selected.id" :container="selected" />
 
         <!-- Config files -->
         <div v-else-if="detailTab === 'config'" class="space-y-4">

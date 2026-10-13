@@ -2,6 +2,7 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue';
 import * as api from '../api';
 import { ApiError } from '../api';
+import { formatSize } from '../files';
 import { sudoMode } from '../sudoMode';
 import { fail, notify } from '../toast';
 import type {
@@ -15,8 +16,12 @@ import type {
   PostgresTablePrivilege,
   PostgresTablePrivileges,
   StepResult,
+  View,
 } from '../types';
 import StepLog from './StepLog.vue';
+
+/** `navigate` opens the Transfer page (next to "New role"). */
+const emit = defineEmits<{ navigate: [View] }>();
 
 const ROLE_ATTRS = ['canlogin', 'superuser', 'createdb', 'createrole', 'replication', 'bypassrls'] as const;
 const ROLE_ATTR_LABEL: Record<(typeof ROLE_ATTRS)[number], string> = {
@@ -309,12 +314,21 @@ const label = 'mb-1.5 block text-xs font-medium text-slate-400';
         </button>
         <button
           v-if="usable"
+          class="flex items-center gap-1.5 rounded-lg border border-sky-700/60 px-3 py-1.5 text-xs font-semibold text-sky-200 hover:bg-sky-500/10"
+          title="Copy a whole database to PostgreSQL on another server"
+          @click="emit('navigate', 'dbtransfer')"
+        >
+          <v-icon name="fa-arrow-right" scale="0.75" /> Transfer
+        </button>
+        <button
+          v-if="usable"
           class="flex items-center gap-1.5 rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-sky-500"
           @click="newRoleOpen = true"
         >
           <v-icon name="fa-plus" scale="0.75" /> New role
         </button>
       </div>
+
 
       <div class="min-h-0 flex-1 overflow-auto p-5">
         <div v-if="loading && !context" class="py-16 text-center">
@@ -344,6 +358,23 @@ const label = 'mb-1.5 block text-xs font-medium text-slate-400';
         </div>
 
         <div v-else class="overflow-hidden rounded-xl border border-slate-800">
+          <div v-if="databases.length" class="border-b border-slate-800 bg-slate-900/60 px-4 py-3">
+            <p class="mb-2 flex items-center gap-2 text-xs text-slate-400">
+              <v-icon name="fa-database" scale="0.7" class="text-sky-300" /> Databases
+              <span class="text-slate-600">· {{ formatSize(databases.reduce((n, d) => n + (d.bytes ?? 0), 0)) }} in total</span>
+            </p>
+            <div class="flex flex-wrap gap-1.5">
+              <span
+                v-for="d in [...databases].sort((a, b) => (b.bytes ?? 0) - (a.bytes ?? 0))"
+                :key="d.name"
+                class="rounded-md bg-slate-800 px-2 py-1 text-[11px]"
+                :title="`Owner: ${d.owner}`"
+              >
+                <span class="font-mono text-slate-200">{{ d.name }}</span>
+                <span class="ml-1.5 text-sky-300">{{ formatSize(d.bytes ?? 0) }}</span>
+              </span>
+            </div>
+          </div>
           <div
             v-for="role in roles"
             :key="role.name"
@@ -408,7 +439,7 @@ const label = 'mb-1.5 block text-xs font-medium text-slate-400';
             <label :class="label">Database</label>
             <select v-model="accessDb" :class="field">
               <option value="">Pick a database…</option>
-              <option v-for="d in databases" :key="d.name" :value="d.name">{{ d.name }}</option>
+              <option v-for="d in databases" :key="d.name" :value="d.name">{{ d.name }}{{ d.bytes ? ` (${formatSize(d.bytes)})` : '' }}</option>
             </select>
           </div>
 

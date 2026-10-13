@@ -20,13 +20,23 @@ export interface Session {
   port: number;
   username: string;
   home: string;
+  /** How this login gets root — see SudoState in server/ssh.ts. */
+  sudo?: SudoState;
+  /** Set on connect when a saved sudo password was sent but sudo refused it. */
+  sudoSavedRejected?: boolean;
 }
+
+export type SudoState = 'root' | 'nopasswd' | 'ok' | 'needed' | 'denied' | 'missing';
 
 export interface Credentials {
   host: string;
   port: number;
   username: string;
   password: string;
+  /** A remembered sudo password to try first, when it differs from the login one. */
+  sudoPassword?: string;
+  /** 6-digit authenticator code, for servers with SSH two-factor. Never saved. */
+  otp?: string;
 }
 
 export interface TextContent {
@@ -71,6 +81,8 @@ export interface SavedServer {
   username: string;
   /** Only present when "remember password" was ticked. */
   password?: string;
+  /** Only present when "remember" was ticked in the sudo password prompt. */
+  sudoPassword?: string;
   label?: string;
   lastUsed: number;
 }
@@ -86,6 +98,8 @@ export interface Shortcut {
 
 export type View =
   | 'home'
+  | 'monitor'
+  | 'security'
   | 'files'
   | 'shortcuts'
   | 'links'
@@ -97,6 +111,7 @@ export type View =
   | 'logs'
   | 'ports'
   | 'postgres'
+  | 'dbtransfer'
   | 'backups';
 
 // ------------------------------------------------------------------- docker
@@ -109,11 +124,57 @@ export interface ComposeInfo {
   envFiles: string[];
 }
 
+// ---------------------------------------------------------------- monitoring
+
+export interface MonitorSample {
+  time: number;
+  cpu: { total: number; idle: number; iowait: number; cores: number };
+  load: [number, number, number];
+  uptimeSeconds: number;
+  memory: { total: number; available: number; buffersCached: number; swapTotal: number; swapFree: number };
+  network: { name: string; rx: number; tx: number; virtual: boolean }[];
+  disks: { name: string; readBytes: number; writeBytes: number }[];
+  filesystems: { mount: string; size: number; used: number; avail: number }[];
+}
+
+export interface NetConnection {
+  proto: string;
+  state: string;
+  local: string;
+  localPort: number;
+  peer: string;
+  peerPort: number;
+  process: string;
+  pid: number | null;
+}
+
+export interface LogTail {
+  path: string;
+  exists: boolean;
+  size?: number;
+  lines: string[];
+}
+
+export interface ContainerStat {
+  id: string;
+  name: string;
+  cpuPct: number;
+  memUsage: string;
+  memPct: number;
+  pids: number;
+  netRx: number;
+  netTx: number;
+}
+
 export interface Container {
   id: string;
   name: string;
   image: string;
   imageId: string;
+  /** Host PID of the container's main process (0 when stopped). */
+  pid?: number;
+  /** Docker's json log file for this container. */
+  logPath?: string;
   /** Came from a dropped file rather than a registry, so updates come from a new file too. */
   imageLocal: boolean;
   state: string;
@@ -374,6 +435,8 @@ export interface PostgresRole {
 export interface PostgresDatabase {
   name: string;
   owner: string;
+  /** pg_database_size, in bytes. */
+  bytes?: number;
 }
 
 /** The real grantable table privileges — there is no ALTER/DROP here because
@@ -440,11 +503,60 @@ export interface PgBackRestContext {
   repo1: { path: string } | null;
   repo2: { host: string; user: string; path: string } | null;
   publicKey: string | null;
+  /** The stanza exists on disk (stanza-create ran), not just in the config file. */
+  stanzaReady?: boolean;
+  stanzaStatus?: string;
+  archiving?: PgBackRestArchiving | null;
+  /** "Rewind up to N days back" — time-based retention. */
+  retentionDays?: number | null;
+  /** Older count-based retention (keep N full backups), from a hand-written config. */
+  retentionCount?: number | null;
+  schedule?: PgBackRestSchedule;
+}
+
+export interface PgBackRestArchiving {
+  mode: string;
+  command: string;
+  timeout: string;
+  walLevel: string;
+  usesPgBackRest: boolean;
+  archivedCount: number;
+  lastArchivedWal: string | null;
+  lastArchivedTime: string | null;
+  failedCount: number;
+  lastFailedWal: string | null;
+  lastFailedTime: string | null;
+}
+
+export interface PgBackRestSchedule {
+  enabled: boolean;
+  /** 0 = Sunday … 6 = Saturday. */
+  fullDay: number;
+  hour: number;
+}
+
+export interface PgBackRestStats {
+  databases: { name: string; bytes: number }[];
+  walLocalBytes: number;
+  disks: DiskUsage[];
+  dataDir: string;
+  repoPath: string;
+}
+
+export interface DiskUsage {
+  mount: string;
+  size: number;
+  used: number;
+  avail: number;
+  source?: string;
+  fstype?: string;
+  holds?: string[];
 }
 
 export interface PgBackRestConfigureSpec {
   stanza: string;
   repo1Path: string;
+  retentionDays?: number;
   remote?: { host: string; port?: number; user: string; path: string };
 }
 
@@ -456,10 +568,14 @@ export interface PgBackRestBackupEntry {
   startTime: number;
   stopTime: number;
   sizeBytes: number;
+  /** Space this backup takes in the repo (compressed; only the changes for diff/incr). */
+  repoBytes?: number;
 }
 
 export interface PgBackRestBackupsResponse {
   backups: PgBackRestBackupEntry[];
   earliest: number | null;
   latest: number | null;
+  archiveTimeout?: number;
+  sizes?: { backupsBytes: number; walArchiveBytes: number } | null;
 }

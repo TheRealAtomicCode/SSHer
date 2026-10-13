@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { nextTick, ref } from 'vue';
+import { nextTick, ref, watch } from 'vue';
 import * as prefs from '../prefs';
 import type { Credentials, SavedServer } from '../types';
 
-defineProps<{ connecting: boolean; error: string }>();
+const props = defineProps<{ connecting: boolean; error: string }>();
 const emit = defineEmits<{
   connect: [Credentials, { remember: boolean; label: string }];
 }>();
@@ -36,14 +36,65 @@ function submit() {
   );
 }
 
-/** A saved server with its password connects in one click; without one, it fills the form. */
-async function pick(server: SavedServer) {
-  host.value = server.host;
-  port.value = server.port;
-  username.value = server.username;
-  label.value = server.label ?? '';
-  password.value = server.password ?? '';
-  remember.value = Boolean(server.password);
+// ------------------------------------------------- login password prompt
+
+/** Asks for a saved server's login password: none saved, or the saved one was refused. */
+const loginPrompt = ref<{
+  server: SavedServer;
+  password: string;
+  remember: boolean;
+  show: boolean;
+  error: string;
+  rejected: boolean;
+} | null>(null);
+const promptInput = ref<HTMLInputElement | null>(null);
+
+/** ssh2's wording when the server refuses the credentials, as opposed to a network error. */
+const AUTH_FAILED = /authentication|auth fail|password|permission denied/i;
+
+async function openLoginPrompt(server: SavedServer, error = '', rejected = false) {
+  loginPrompt.value = { server, password: '', remember: true, show: false, error, rejected };
+  await nextTick();
+  promptInput.value?.focus();
+}
+
+function submitLoginPrompt() {
+  const p = loginPrompt.value;
+  if (!p?.password) return;
+  p.error = '';
+  pending.value = p.server.id;
+  emit(
+    'connect',
+    { host: p.server.host, port: p.server.port, username: p.server.username, password: p.password },
+    { remember: p.remember, label: p.server.label ?? '' },
+  );
+}
+
+// When a one-click login (or the prompt) fails, decide whether it was the password.
+watch(
+  () => props.connecting,
+  (now, before) => {
+    if (!before || now || !pending.value || !props.error) return;
+    const server = servers.value.find((s) => s.id === pending.value);
+    pending.value = null;
+    if (!server) return;
+    if (!AUTH_FAILED.test(props.error)) {
+      // Network trouble, not the password — show it, but don't ask for a new one.
+      if (loginPrompt.value) loginPrompt.value.error = props.error;
+      return;
+    }
+    if (loginPrompt.value) {
+      loginPrompt.value.error = 'Wrong password — try again.';
+      loginPrompt.value.password = '';
+      promptInput.value?.focus();
+    } else {
+      openLoginPrompt(server, 'The saved password was rejected — it may have changed. Enter the current one.', true);
+    }
+  },
+);
+
+/** A saved password connects in one click; without one (or a refused one), it asks. */
+function pick(server: SavedServer) {
   if (server.password) {
     pending.value = server.id;
     emit(
@@ -52,10 +103,46 @@ async function pick(server: SavedServer) {
       { remember: true, label: server.label ?? '' },
     );
   } else {
-    await nextTick();
-    passwordInput.value?.focus();
+    openLoginPrompt(server);
   }
 }
+
+// ---------------------------------------------------------- passwords panel
+
+/** Per-server: see which passwords are saved, forget or replace each, keep the server. */
+const pwPanel = ref<{ server: SavedServer; editing: 'password' | 'sudoPassword' | null; value: string } | null>(null);
+
+function refreshServers() {
+  servers.value = prefs.savedServers();
+  if (pwPanel.value) {
+    const fresh = servers.value.find((s) => s.id === pwPanel.value!.server.id);
+    if (fresh) pwPanel.value.server = fresh;
+  }
+}
+
+function forgetPassword(field: 'password' | 'sudoPassword') {
+  const panel = pwPanel.value;
+  if (!panel) return;
+  prefs.updateServer(panel.server.id, { [field]: undefined });
+  refreshServers();
+}
+
+function savePassword() {
+  const panel = pwPanel.value;
+  if (!panel?.editing || !panel.value) return;
+  prefs.updateServer(panel.server.id, { [panel.editing]: panel.value });
+  panel.editing = null;
+  panel.value = '';
+  refreshServers();
+}
+
+function forgetAllPasswords() {
+  if (!confirm('Forget every saved password? Your servers stay in the list; you will be asked for passwords when you connect.')) return;
+  for (const s of servers.value) prefs.updateServer(s.id, { password: undefined, sudoPassword: undefined });
+  refreshServers();
+}
+
+const savedPasswordCount = () => servers.value.filter((s) => s.password || s.sudoPassword).length;
 
 function forget(server: SavedServer) {
   if (!confirm(`Remove ${server.label || server.id} from saved servers?`)) return;
@@ -96,7 +183,16 @@ const input =
             <h2 class="text-lg font-semibold text-white">Your servers</h2>
             <p class="text-sm text-slate-500">Successful logins are saved in this browser.</p>
           </div>
-          <span class="text-xs text-slate-600">{{ servers.length }} saved</span>
+          <div class="text-right">
+            <span class="block text-xs text-slate-600">{{ servers.length }} saved</span>
+            <button
+              v-if="savedPasswordCount()"
+              class="text-[11px] text-slate-500 hover:text-red-400"
+              @click="forgetAllPasswords"
+            >
+              Forget all passwords
+            </button>
+          </div>
         </div>
 
         <div class="grid gap-3 sm:grid-cols-2">
@@ -145,6 +241,9 @@ const input =
                     <v-icon :name="server.password ? 'fa-bolt' : 'fa-lock'" scale="0.6" />
                     {{ server.password ? 'One-click' : 'Asks for password' }}
                   </span>
+                  <span v-if="server.sudoPassword" class="flex items-center gap-1 text-amber-400" title="A sudo password is saved">
+                    <v-icon name="fa-key" scale="0.6" /> sudo
+                  </span>
                 </p>
               </div>
             </div>
@@ -153,6 +252,13 @@ const input =
               class="absolute top-2 right-2 flex gap-0.5 opacity-0 transition group-hover:opacity-100"
               @click.stop
             >
+              <button
+                title="Passwords"
+                class="rounded p-1.5 text-slate-500 hover:bg-slate-800 hover:text-amber-300"
+                @click="pwPanel = { server, editing: null, value: '' }"
+              >
+                <v-icon name="fa-key" scale="0.65" />
+              </button>
               <button
                 title="Rename"
                 class="rounded p-1.5 text-slate-500 hover:bg-slate-800 hover:text-white"
@@ -295,6 +401,151 @@ const input =
           </button>
         </form>
       </section>
+    </div>
+
+    <!-- Login password for a saved server (none saved, or the saved one was refused) -->
+    <div
+      v-if="loginPrompt"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-sm"
+      @click.self="loginPrompt = null"
+    >
+      <form
+        class="w-full max-w-sm rounded-xl border border-slate-700 bg-slate-900 p-5 shadow-2xl"
+        @submit.prevent="submitLoginPrompt"
+        @keydown.esc="loginPrompt = null"
+      >
+        <h2 class="flex items-center gap-2 font-semibold text-white">
+          <v-icon name="fa-lock" class="text-emerald-400" /> {{ loginPrompt.server.label || loginPrompt.server.host }}
+        </h2>
+        <p class="mt-1 font-mono text-xs text-slate-400">
+          {{ loginPrompt.server.username }}@{{ loginPrompt.server.host }}
+        </p>
+        <p
+          v-if="loginPrompt.error"
+          class="mt-3 rounded-lg border px-3 py-2 text-sm"
+          :class="loginPrompt.rejected ? 'border-amber-800/60 bg-amber-950/40 text-amber-200' : 'border-red-900/50 bg-red-950/50 text-red-300'"
+        >
+          {{ loginPrompt.error }}
+        </p>
+        <label class="mt-4 mb-1.5 block text-xs font-medium text-slate-400">Password</label>
+        <div class="relative">
+          <input
+            ref="promptInput"
+            v-model="loginPrompt.password"
+            :type="loginPrompt.show ? 'text' : 'password'"
+            autocomplete="current-password"
+            class="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2.5 pr-10 text-sm text-slate-100 focus:border-emerald-500 focus:outline-none"
+          />
+          <button
+            type="button"
+            tabindex="-1"
+            class="absolute top-1/2 right-2 -translate-y-1/2 rounded p-1 text-slate-500 hover:text-white"
+            @click="loginPrompt.show = !loginPrompt.show"
+          >
+            <v-icon :name="loginPrompt.show ? 'fa-eye-slash' : 'fa-eye'" scale="0.8" />
+          </button>
+        </div>
+        <label class="mt-3 flex cursor-pointer items-center gap-2 text-sm text-slate-300">
+          <input v-model="loginPrompt.remember" type="checkbox" class="accent-emerald-500" />
+          Remember this password
+        </label>
+        <div class="mt-5 flex justify-end gap-2">
+          <button type="button" class="rounded-lg px-3 py-2 text-sm text-slate-400 hover:bg-slate-800 hover:text-white" @click="loginPrompt = null">
+            Cancel
+          </button>
+          <button
+            type="submit"
+            :disabled="!loginPrompt.password || connecting"
+            class="flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-500 disabled:opacity-40"
+          >
+            <v-icon v-if="connecting" name="fa-spinner" class="animate-spin" scale="0.8" />
+            Connect
+          </button>
+        </div>
+      </form>
+    </div>
+
+    <!-- Saved passwords for one server -->
+    <div
+      v-if="pwPanel"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-sm"
+      @click.self="pwPanel = null"
+    >
+      <div class="w-full max-w-md rounded-xl border border-slate-700 bg-slate-900 p-5 shadow-2xl" @keydown.esc="pwPanel = null">
+        <div class="mb-1 flex items-center gap-2">
+          <v-icon name="fa-key" class="text-amber-300" />
+          <h2 class="flex-1 font-semibold text-white">Passwords</h2>
+          <button class="rounded-md p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white" @click="pwPanel = null">
+            <v-icon name="fa-times" scale="0.8" />
+          </button>
+        </div>
+        <p class="mb-4 font-mono text-xs text-slate-400">
+          {{ pwPanel.server.username }}@{{ pwPanel.server.host }}<span v-if="pwPanel.server.port !== 22">:{{ pwPanel.server.port }}</span>
+        </p>
+
+        <div
+          v-for="row in [
+            { field: 'password', title: 'Login password', hint: 'Used to open the SSH connection.' },
+            { field: 'sudoPassword', title: 'sudo password', hint: pwPanel.server.username === 'root'
+                ? 'Not needed — you log in as root.'
+                : 'Used when an action needs root. Usually the same as the login password; SSHer tries that first.' },
+          ] as const"
+          :key="row.field"
+          class="mb-3 rounded-lg border border-slate-800 bg-slate-950/50 p-3"
+        >
+          <div class="flex items-center gap-2">
+            <p class="flex-1 text-sm font-medium text-white">{{ row.title }}</p>
+            <span
+              class="rounded-full px-2 py-0.5 text-[10px]"
+              :class="pwPanel.server[row.field] ? 'bg-emerald-500/15 text-emerald-300' : 'bg-slate-800 text-slate-500'"
+            >
+              {{ pwPanel.server[row.field] ? 'Saved' : 'Not saved' }}
+            </span>
+          </div>
+          <p class="mt-0.5 text-[11px] text-slate-500">{{ row.hint }}</p>
+
+          <form
+            v-if="pwPanel.editing === row.field"
+            class="mt-2 flex gap-2"
+            @submit.prevent="savePassword"
+          >
+            <input
+              v-model="pwPanel.value"
+              type="password"
+              autofocus
+              placeholder="New password"
+              class="min-w-0 flex-1 rounded-md border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-white focus:border-emerald-500 focus:outline-none"
+            />
+            <button type="submit" :disabled="!pwPanel.value" class="rounded-md bg-emerald-600 px-3 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-40">
+              Save
+            </button>
+            <button type="button" class="rounded-md px-2 text-xs text-slate-400 hover:text-white" @click="pwPanel.editing = null">
+              Cancel
+            </button>
+          </form>
+          <div v-else class="mt-2 flex gap-2">
+            <button
+              class="rounded-md border border-slate-700 px-2.5 py-1 text-xs text-slate-300 hover:border-slate-500 hover:text-white"
+              @click="pwPanel.editing = row.field; pwPanel.value = ''"
+            >
+              {{ pwPanel.server[row.field] ? 'Change' : 'Set' }}
+            </button>
+            <button
+              v-if="pwPanel.server[row.field]"
+              class="rounded-md border border-red-900 px-2.5 py-1 text-xs text-red-400 hover:bg-red-950"
+              @click="forgetPassword(row.field)"
+            >
+              Forget
+            </button>
+          </div>
+        </div>
+
+        <p class="text-[11px] leading-relaxed text-slate-500">
+          Passwords are kept in this browser's localStorage, in plain text. Forgetting one keeps the server
+          in your list — you'll be asked for the password next time it's needed. A saved password isn't checked
+          until it's used; if it's wrong, you're asked for the right one.
+        </p>
+      </div>
     </div>
   </div>
 </template>

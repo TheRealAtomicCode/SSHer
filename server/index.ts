@@ -10,15 +10,22 @@ import { registerDotnet } from './dotnet.js';
 import { registerNginx } from './nginx.js';
 import { execMaybeRootOrThrow, registerOps, str } from './ops.js';
 import { registerPermissions } from './permissions.js';
+import { registerMonitor } from './monitor.js';
+import { registerSecurity } from './security.js';
+import { registerTwoFactor } from './twofa.js';
 import { registerPgBackRest } from './pgbackrest.js';
+import { registerDbTransfer } from './dbtransfer.js';
 import { registerPostgres } from './postgres.js';
 import { registerProcesses } from './processes.js';
 import { registerTerminal } from './terminal.js';
 import { advanceTransfer, finishTransfer, getTransfer, startTransfer } from './transfers.js';
 import { registerUsers } from './users.js';
 import {
+  checkSudoPassword,
+  OtpRequiredError,
   connect,
   disconnect,
+  probeSudo,
   execOrThrow,
   getSession,
   readdir,
@@ -134,7 +141,7 @@ app.get('/api/access', (_req, res) => {
 });
 
 app.post('/api/connect', async (req: Request, res: Response) => {
-  const { host, port, username, password, privateKey, passphrase } = req.body ?? {};
+  const { host, port, username, password, privateKey, passphrase, sudoPassword, otp } = req.body ?? {};
   if (!host || !username) {
     res.status(400).json({ error: 'host and username are required' });
     return;
@@ -151,16 +158,22 @@ app.post('/api/connect', async (req: Request, res: Response) => {
       password: password ? String(password) : undefined,
       privateKey: privateKey ? String(privateKey) : undefined,
       passphrase: passphrase ? String(passphrase) : undefined,
+      otp: otp ? String(otp).replace(/\s/g, '') : undefined,
     });
+    // Saved sudo password first, then the login password — on most servers they're
+    // the same account password. Only one that sudo actually accepts is kept.
+    const savedSudo = sudoPassword ? String(sudoPassword) : undefined;
+    session.sudo = await probeSudo(session, [savedSudo, password ? String(password) : undefined]).catch(
+      () => 'needed' as const,
+    );
     res.json({
-      sessionId: session.id,
-      host: session.host,
-      port: session.port,
-      username: session.username,
-      home: session.home,
+      ...sessionInfo(session),
+      // So the client can say "your saved sudo password didn't work" rather than just asking.
+      sudoSavedRejected: Boolean(savedSudo) && session.sudoPassword !== savedSudo,
     });
   } catch (err) {
-    res.status(401).json({ error: (err as Error).message || 'Connection failed' });
+    // otpRequired tells the login screen to ask for the authenticator code and retry.
+    res.status(401).json({ error: (err as Error).message || 'Connection failed', otpRequired: err instanceof OtpRequiredError });
   }
 });
 
@@ -169,15 +182,52 @@ app.post('/api/disconnect', requireSession, (req: SessionRequest, res: Response)
   res.json({ ok: true });
 });
 
-app.get('/api/session', requireSession, (req: SessionRequest, res: Response) => {
-  const session = req.session!;
-  res.json({
+function sessionInfo(session: SshSession) {
+  return {
     sessionId: session.id,
     host: session.host,
     port: session.port,
     username: session.username,
     home: session.home,
-  });
+    sudo: session.sudo,
+  };
+}
+
+app.get('/api/session', requireSession, (req: SessionRequest, res: Response) => {
+  res.json(sessionInfo(req.session!));
+});
+
+/** Checks a sudo password and, if sudo accepts it, keeps it for this session. */
+app.post('/api/sudo', requireSession, asyncRoute(async (req, res) => {
+  const session = req.session!;
+  const password = typeof req.body?.password === 'string' ? req.body.password : '';
+  if (session.username === 'root') {
+    res.json({ ok: true, sudo: 'root' });
+    return;
+  }
+  if (!password) {
+    res.status(400).json({ error: 'Enter the sudo password' });
+    return;
+  }
+  const verdict = await checkSudoPassword(session, password);
+  if (verdict === 'ok') {
+    session.sudoPassword = password;
+    session.sudo = 'ok';
+    res.json({ ok: true, sudo: session.sudo });
+  } else if (verdict === 'denied') {
+    session.sudo = 'denied';
+    res.status(403).json({ error: `${session.username} is not allowed to use sudo on this server`, sudoDenied: true });
+  } else {
+    res.status(403).json({ error: 'sudo rejected that password', sudoWrong: true });
+  }
+}));
+
+/** Drops the stored sudo password from this session (the next privileged action will ask). */
+app.post('/api/sudo/forget', requireSession, (req: SessionRequest, res: Response) => {
+  const session = req.session!;
+  delete session.sudoPassword;
+  if (session.sudo === 'ok') session.sudo = 'needed';
+  res.json({ ok: true, sudo: session.sudo });
 });
 
 /** Every shell command run for this session so far — what runs behind any button
@@ -198,7 +248,10 @@ app.get(
   requireSession,
   asyncRoute(async (req, res) => {
     const session = req.session!;
-    const dir = await realpath(session, remotePath(session, req.query.path));
+    const requested = remotePath(session, req.query.path);
+    // /proc/<pid>/root is a "magic" link into another process's filesystem (a Docker
+    // container's, say). realpath() collapses it to the host's "/", so leave it be.
+    const dir = /^\/proc\/\d+\/root(\/|$)/.test(requested) ? requested : await realpath(session, requested);
 
     // Check it really is a directory before reading it. Servers differ in how
     // they answer an opendir on a regular file — some just never reply — so
@@ -505,9 +558,13 @@ registerNginx(app, requireSession as express.RequestHandler, asyncRoute, upload)
 registerDotnet(app, requireSession as express.RequestHandler, asyncRoute, upload);
 registerUsers(app, requireSession as express.RequestHandler, asyncRoute);
 registerPostgres(app, requireSession as express.RequestHandler, asyncRoute);
+registerDbTransfer(app, requireSession as express.RequestHandler, asyncRoute);
 registerPermissions(app, requireSession as express.RequestHandler, asyncRoute);
 registerProcesses(app, requireSession as express.RequestHandler, asyncRoute);
 registerPgBackRest(app, requireSession as express.RequestHandler, asyncRoute);
+registerMonitor(app, requireSession as express.RequestHandler, asyncRoute);
+registerSecurity(app, requireSession as express.RequestHandler, asyncRoute);
+registerTwoFactor(app, requireSession as express.RequestHandler, asyncRoute);
 
 app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
   console.error('[api]', err.message);

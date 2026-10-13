@@ -4,9 +4,13 @@ import * as api from '../api';
 import { fail, notify } from '../toast';
 import type { LocalApp, NginxSite, NginxSiteSpec, RemoteFile } from '../types';
 import NginxSiteDialog from './NginxSiteDialog.vue';
+import NginxTrafficPanel from './NginxTrafficPanel.vue';
 import TextEditor from './TextEditor.vue';
 
-const emit = defineEmits<{ openPath: [{ path: string; isDirectory: boolean }] }>();
+const emit = defineEmits<{ openPath: [{ path: string; isDirectory: boolean; reveal?: boolean }] }>();
+
+/** The site whose traffic/logs panel is open. */
+const traffic = ref<NginxSite | null>(null);
 
 const loading = ref(true);
 const sites = ref<NginxSite[]>([]);
@@ -263,6 +267,12 @@ const btn = 'rounded-md p-1.5 text-slate-400 transition hover:bg-slate-800 hover
             <button :class="btn" :title="site.enabled ? 'Disable' : 'Enable'" :disabled="busy.has(site.name)" @click="toggleEnabled(site)">
               <v-icon :name="site.enabled ? 'fa-toggle-on' : 'fa-toggle-off'" scale="1.1" :class="site.enabled ? 'text-emerald-400' : 'text-slate-500'" />
             </button>
+            <button :class="btn" title="Traffic, connections & logs" @click="traffic = site">
+              <v-icon name="fa-chart-line" scale="0.8" class="text-emerald-300" />
+            </button>
+            <button :class="btn" title="Open in folder" @click="emit('openPath', { path: site.path, isDirectory: false, reveal: true })">
+              <v-icon name="fa-folder-open" scale="0.8" />
+            </button>
             <button :class="btn" title="Edit" @click="editSite(site)">
               <v-icon name="fa-pen" scale="0.8" />
             </button>
@@ -297,6 +307,13 @@ const btn = 'rounded-md p-1.5 text-slate-400 transition hover:bg-slate-800 hover
         <p class="mt-3 text-base font-semibold text-white">Drop the config to add it as a site</p>
       </div>
     </div>
+
+    <NginxTrafficPanel
+      v-if="traffic"
+      :site="traffic"
+      @close="traffic = null"
+      @open-path="(p) => { traffic = null; emit('openPath', p); }"
+    />
 
     <NginxSiteDialog
       v-if="dialog"

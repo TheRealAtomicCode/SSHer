@@ -1,17 +1,25 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import * as api from '../api';
 import { fail } from '../toast';
 import type { Container } from '../types';
 import LogViewer from './LogViewer.vue';
 
 const props = defineProps<{ initial?: string }>();
-const emit = defineEmits<{ openPath: [{ path: string; isDirectory: boolean }] }>();
+const emit = defineEmits<{
+  openPath: [{ path: string; isDirectory: boolean; reveal?: boolean }];
+  /** The selected container, for the URL (#/logs/<name>). */
+  select: [string];
+}>();
 
 const containers = ref<Container[]>([]);
 const loading = ref(true);
 const available = ref(true);
 const selected = ref(props.initial ?? '');
+
+// Back/Forward change `initial`; picking one reports it back.
+watch(() => props.initial, (name) => name && name !== selected.value && (selected.value = name));
+watch(selected, (name) => name && emit('select', name));
 
 /** A restart policy keeps bringing a crashing container back — its logs say why it died. */
 const crashing = (c: Container) => c.state === 'restarting' || (c.state === 'exited' && c.restartPolicy !== 'no');

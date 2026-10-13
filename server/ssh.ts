@@ -27,6 +27,38 @@ export interface SshSession {
    *  PASSWORD`) always pipes it over stdin rather than putting it on the command
    *  line, specifically so this log can never end up holding one. */
   commandLog: CommandLogEntry[];
+  /** The password `sudo` accepted for this login, held in memory for the life of the
+   *  session only. Fed to `sudo -S` over stdin, never put on a command line, so it
+   *  can't reach the command log or the remote process list. */
+  sudoPassword?: string;
+  /** What we learned about sudo when the session opened (see probeSudo). */
+  sudo: SudoState;
+}
+
+export type SudoState =
+  | 'root' // logged in as root: nothing to escalate
+  | 'nopasswd' // sudo works without a password
+  | 'ok' // a password is stored and sudo accepted it
+  | 'needed' // sudo wants a password we don't have (or the one we had was wrong)
+  | 'denied' // this user may not use sudo at all
+  | 'missing'; // sudo isn't installed
+
+/** `sudo` reading its password from stdin with no prompt text. exec() spots this
+ *  prefix and pipes the stored password in. */
+export const SUDO_STDIN = "sudo -S -p ''";
+
+/** The `sudo …` to put in front of a command, e.g. sudoPrefix(s, '-H -u postgres'). */
+export function sudoPrefix(session: SshSession, args = ''): string {
+  const base = session.sudoPassword ? SUDO_STDIN : 'sudo -n';
+  return args ? `${base} ${args}` : base;
+}
+
+/** One password line per `sudo -S` in the command. A sudo that finds a still-valid
+ *  timestamp doesn't read its line, which is harmless for the commands we run. */
+function sudoStdin(session: SshSession, command: string): string {
+  if (!session.sudoPassword) return '';
+  const count = command.split(SUDO_STDIN).length - 1;
+  return `${session.sudoPassword}\n`.repeat(count);
 }
 
 export interface ConnectOptions {
@@ -36,7 +68,19 @@ export interface ConnectOptions {
   password?: string;
   privateKey?: string;
   passphrase?: string;
+  /** 6-digit authenticator code, for servers with SSH two-factor (PAM google-authenticator). */
+  otp?: string;
 }
+
+/** Thrown when the server asked for a verification code and none was supplied. */
+export class OtpRequiredError extends Error {
+  constructor() {
+    super('This server asks for a verification code (two-factor login).');
+  }
+}
+
+/** How servers word the second-factor prompt (google-authenticator, Duo, oathtool…). */
+const OTP_PROMPT = /verification code|one[- ]time|otp|token|authenticator|2fa|two[- ]factor/i;
 
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 const COMMAND_LOG_LIMIT = 300;
@@ -65,7 +109,33 @@ export function connect(opts: ConnectOptions): Promise<SshSession> {
       reject(err);
     };
 
-    conn.on('error', fail);
+    let otpAsked = false;
+    conn.on('error', (err) => fail(otpAsked && !opts.otp ? new OtpRequiredError() : err));
+    // A server can also just hang up mid-login (sshd "fatal: Access denied … [preauth]")
+    // without an error event; without this the login would wait forever.
+    conn.on('close', () =>
+      fail(otpAsked && !opts.otp ? new OtpRequiredError() : new Error('The server closed the connection during login (login refused)')),
+    );
+    // With two-factor on, sshd asks through keyboard-interactive: "Password:" then
+    // "Verification code:". Answer each prompt with the right one.
+    conn.on('keyboard-interactive', (_name, _instructions, _lang, prompts, finish) => {
+      // No code to give: hang up rather than send a blank one, which would count as a
+      // failed attempt against the user's 2FA rate limit and be logged as a failure.
+      if (!opts.otp && prompts.some((p) => OTP_PROMPT.test(p.prompt))) {
+        otpAsked = true;
+        conn.end();
+        return;
+      }
+      finish(
+        prompts.map((p) => {
+          if (OTP_PROMPT.test(p.prompt)) {
+            otpAsked = true;
+            return opts.otp ?? '';
+          }
+          return opts.password ?? '';
+        }),
+      );
+    });
     conn.on('ready', () => {
       conn.sftp((err, sftp) => {
         if (err) return fail(err);
@@ -82,6 +152,7 @@ export function connect(opts: ConnectOptions): Promise<SshSession> {
             sftp,
             lastUsed: Date.now(),
             commandLog: [],
+            sudo: opts.username === 'root' ? 'root' : 'needed',
           };
           sessions.set(session.id, session);
           conn.on('close', () => sessions.delete(session.id));
@@ -98,6 +169,8 @@ export function connect(opts: ConnectOptions): Promise<SshSession> {
       password: opts.password || undefined,
       privateKey: opts.privateKey || undefined,
       passphrase: opts.passphrase || undefined,
+      // Lets servers with two-factor ask for the code (see the keyboard-interactive handler).
+      tryKeyboard: true,
       readyTimeout: 20_000,
       keepaliveInterval: 15_000,
     });
@@ -124,12 +197,17 @@ export interface ExecResult {
   stderr: string;
 }
 
-export function exec(session: SshSession, command: string): Promise<ExecResult> {
+/** `quiet` keeps a command out of the activity log — for monitoring polls, which would
+ *  otherwise flood it with the same command every second. */
+export function exec(session: SshSession, command: string, quiet = false): Promise<ExecResult> {
+  // A `sudo -S` command needs its password on stdin; route it through the input path.
+  const password = sudoStdin(session, command);
+  if (password) return execWithInput(session, command, '', quiet);
   const started = Date.now();
   return new Promise((resolve, reject) => {
     session.conn.exec(command, (err, stream) => {
       if (err) {
-        recordCommand(session, command, null, Date.now() - started);
+        if (!quiet) recordCommand(session, command, null, Date.now() - started);
         return reject(err);
       }
       let stdout = '';
@@ -141,7 +219,7 @@ export function exec(session: SshSession, command: string): Promise<ExecResult> 
         stderr += chunk.toString('utf8');
       });
       stream.on('close', (code: number | null) => {
-        recordCommand(session, command, code ?? 0, Date.now() - started);
+        if (!quiet) recordCommand(session, command, code ?? 0, Date.now() - started);
         resolve({ code: code ?? 0, stdout, stderr });
       });
     });
@@ -153,12 +231,13 @@ export function execWithInput(
   session: SshSession,
   command: string,
   input: string,
+  quiet = false,
 ): Promise<ExecResult> {
   const started = Date.now();
   return new Promise((resolve, reject) => {
     session.conn.exec(command, (err, stream) => {
       if (err) {
-        recordCommand(session, command, null, Date.now() - started);
+        if (!quiet) recordCommand(session, command, null, Date.now() - started);
         return reject(err);
       }
       let stdout = '';
@@ -170,12 +249,56 @@ export function execWithInput(
         stderr += chunk.toString('utf8');
       });
       stream.on('close', (code: number | null) => {
-        recordCommand(session, command, code ?? 0, Date.now() - started);
+        if (!quiet) recordCommand(session, command, code ?? 0, Date.now() - started);
         resolve({ code: code ?? 0, stdout, stderr });
       });
-      stream.end(input);
+      // sudo -S consumes its password line first; the command gets the rest.
+      stream.end(sudoStdin(session, command) + input);
     });
   });
+}
+
+/** Asks sudo, without using any cached timestamp (-k), whether `password` works. */
+export async function checkSudoPassword(
+  session: SshSession,
+  password: string,
+): Promise<'ok' | 'wrong' | 'denied'> {
+  // Deliberately not execWithInput's sudo handling: this tests a candidate, not the stored one.
+  const result = await new Promise<ExecResult>((resolve, reject) => {
+    session.conn.exec(`${SUDO_STDIN} -k true`, (err, stream) => {
+      if (err) return reject(err);
+      let stderr = '';
+      stream.on('data', () => {});
+      stream.stderr.on('data', (chunk: Buffer) => {
+        stderr += chunk.toString('utf8');
+      });
+      stream.on('close', (code: number | null) => resolve({ code: code ?? 0, stdout: '', stderr }));
+      stream.end(`${password}\n`);
+    });
+  });
+  if (result.code === 0) return 'ok';
+  if (/not in the sudoers|not allowed to (run|execute)|may not run sudo/i.test(result.stderr)) return 'denied';
+  return 'wrong';
+}
+
+/** Works out how this login gets root, trying each candidate password in turn. */
+export async function probeSudo(session: SshSession, candidates: (string | undefined)[]): Promise<SudoState> {
+  if (session.username === 'root') return 'root';
+  const installed = await exec(session, 'command -v sudo >/dev/null 2>&1 && echo yes');
+  if (installed.stdout.trim() !== 'yes') return 'missing';
+  const nopasswd = await exec(session, 'sudo -n true 2>&1');
+  if (nopasswd.code === 0) return 'nopasswd';
+  if (/not in the sudoers|may not run sudo/i.test(nopasswd.stdout)) return 'denied';
+
+  for (const candidate of [...new Set(candidates.filter((c): c is string => Boolean(c)))]) {
+    const verdict = await checkSudoPassword(session, candidate);
+    if (verdict === 'ok') {
+      session.sudoPassword = candidate;
+      return 'ok';
+    }
+    if (verdict === 'denied') return 'denied';
+  }
+  return 'needed';
 }
 
 /** Hands back the raw channel for `command` instead of buffering it, so its stdout can

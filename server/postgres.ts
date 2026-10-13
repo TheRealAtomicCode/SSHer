@@ -12,7 +12,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Express, Response } from 'express';
 import { badRequestRoute, need, run, runSteps, str, type AsyncRoute, type SessionRequest, type Step } from './ops.js';
-import { exec, execWithInput, shellQuote, type SshSession } from './ssh.js';
+import { exec, execWithInput, shellQuote, sudoPrefix, type SshSession } from './ssh.js';
 
 const PG_IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -68,7 +68,7 @@ export async function execAsPostgres(session: SshSession, command: string): Prom
   // below so real psql errors aren't lost — that warning text ends up ahead of
   // the actual JSON, which breaks runPgJson's JSON.parse despite psql itself
   // having exited 0.
-  return exec(session, session.username === 'postgres' ? command : `sudo -n -H -u postgres ${command}`);
+  return exec(session, session.username === 'postgres' ? command : `${sudoPrefix(session, '-H -u postgres')} ${command}`);
 }
 
 /** Writes `sql` to a scratch file as the connected (unprivileged) user — no root
@@ -250,7 +250,7 @@ export function registerPostgres(app: Express, requireSession: import('express')
       const databases = await runPgJson(
         req.session!,
         `SELECT COALESCE(json_agg(row_to_json(d)), '[]'::json) FROM (
-           SELECT datname AS name, pg_catalog.pg_get_userbyid(datdba) AS owner
+           SELECT datname AS name, pg_catalog.pg_get_userbyid(datdba) AS owner, pg_database_size(datname) AS bytes
            FROM pg_database WHERE datistemplate = false ORDER BY datname
          ) d;`,
       );

@@ -1,4 +1,11 @@
 import type {
+  ContainerStat,
+  LogTail,
+  MonitorSample,
+  NetConnection,
+  DiskUsage,
+  PgBackRestSchedule,
+  PgBackRestStats,
   AclEntry,
   ArchiveSupport,
   ComposeInfo,
@@ -101,7 +108,29 @@ export async function accessStatus(): Promise<{ required: boolean; ok: boolean }
   return { required: true, ok: check.ok };
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+// ------------------------------------------------------------------- sudo
+
+/** sudo's own wording when it needs a password it wasn't given (or got a wrong one). */
+const SUDO_NEEDS_PASSWORD =
+  /sudo: (a password is required|a terminal is required|no tty present|\d+ incorrect password attempts?|no password was provided|unable to read password)/i;
+
+/** Set by the app: shows the password prompt, resolves true once sudo accepted one. */
+let sudoHandler: ((message: string) => Promise<boolean>) | null = null;
+
+export function onSudoPasswordNeeded(handler: (message: string) => Promise<boolean>): void {
+  sudoHandler = handler;
+}
+
+/** Checks a sudo password on the server; on success it is used for this session. */
+export function setSudoPassword(password: string): Promise<{ ok: boolean; sudo: string }> {
+  return request('/sudo', { method: 'POST', body: json({ password }) }, false);
+}
+
+export function forgetSudoPassword(): Promise<{ ok: boolean; sudo: string }> {
+  return request('/sudo/forget', { method: 'POST' }, false);
+}
+
+async function request<T>(path: string, init: RequestInit = {}, sudoRetry = true): Promise<T> {
   const headers = new Headers(init.headers);
   if (sessionId) headers.set('x-session-id', sessionId);
   if (accessKey) headers.set('x-access-key', accessKey);
@@ -115,7 +144,23 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (!response.ok) {
     // An access-key 401 says nothing about the SSH session, so keep it.
     if (response.status === 401 && !payload.accessKey) setSessionId(null);
-    throw new ApiError(payload.error || `Request failed (${response.status})`, payload);
+    const message = payload.error || `Request failed (${response.status})`;
+    // The error can be the route's message or buried in a step log, so search all of it.
+    if (sudoRetry && sudoHandler && SUDO_NEEDS_PASSWORD.test(JSON.stringify(payload))) {
+      if (await sudoHandler(message)) return request<T>(path, init, false);
+    }
+    throw new ApiError(message, payload);
+  }
+  // Some reads report "can't do this" as a normal answer, e.g. the Docker page's
+  // { available: false, error: 'sudo: a password is required' }.
+  if (
+    sudoRetry &&
+    sudoHandler &&
+    typeof payload?.error === 'string' &&
+    SUDO_NEEDS_PASSWORD.test(payload.error) &&
+    (await sudoHandler(payload.error))
+  ) {
+    return request<T>(path, init, false);
   }
   return payload as T;
 }
@@ -645,6 +690,25 @@ export function pgbackrestBackups(): Promise<PgBackRestBackupsResponse> {
   return request('/pgbackrest/backups');
 }
 
+export function pgbackrestFinishSetup(): Promise<{ log: StepResult[] }> {
+  return request('/pgbackrest/finish-setup', { method: 'POST' });
+}
+
+export function pgbackrestSettings(settings: {
+  retentionDays: number;
+  schedule: PgBackRestSchedule;
+}): Promise<{ log: StepResult[] }> {
+  return request('/pgbackrest/settings', { method: 'POST', body: json(settings) });
+}
+
+export function pgbackrestStats(): Promise<PgBackRestStats> {
+  return request('/pgbackrest/stats');
+}
+
+export function systemDisk(): Promise<{ disks: DiskUsage[] }> {
+  return request('/system/disk');
+}
+
 export function pgbackrestRestore(targetTime: string, repo?: 1 | 2): Promise<{ log: StepResult[] }> {
   return request('/pgbackrest/restore', { method: 'POST', body: json({ targetTime, repo, confirm: true }) });
 }
@@ -674,4 +738,189 @@ export function processes(): Promise<{ processes: ProcessInfo[] }> {
 
 export function signalProcess(pid: number, signal: Signal): Promise<{ output: string }> {
   return request(`/processes/${pid}/signal`, { method: 'POST', body: json({ signal }) });
+}
+
+// -------------------------------------------------------------- monitoring
+
+export function monitorSample(): Promise<MonitorSample> {
+  return request('/monitor/sample');
+}
+
+export function monitorConnections(): Promise<{ connections: NetConnection[] }> {
+  return request('/monitor/connections');
+}
+
+export function logTail(path: string, lines = 500): Promise<LogTail> {
+  return request(`/logs/tail?path=${encodeURIComponent(path)}&lines=${lines}`);
+}
+
+export function nginxSiteLogs(name: string): Promise<{ access: string; error: string; ports: number[] }> {
+  return request(`/nginx/site-logs?name=${encodeURIComponent(name)}`);
+}
+
+export function nginxStats(): Promise<{
+  processes: { pid: number; cpuPct: number; memBytes: number; uptimeSeconds: number; command: string }[];
+  connections: NetConnection[];
+}> {
+  return request('/nginx/stats');
+}
+
+export function dockerStats(): Promise<{ time: number; containers: ContainerStat[] }> {
+  return request('/docker/stats');
+}
+
+export function dockerContainerConnections(pid: number): Promise<{ connections: NetConnection[] }> {
+  return request(`/docker/connections?pid=${pid}`);
+}
+
+// ---------------------------------------------------------------- security
+
+export function whoami(): Promise<{ browserIp: string; sshClientIp: string }> {
+  return request('/whoami');
+}
+
+export type Severity = 'critical' | 'high' | 'medium' | 'low' | 'info' | 'ok';
+
+export interface SecurityFinding {
+  id: string;
+  category: string;
+  severity: Severity;
+  title: string;
+  detail: string;
+  evidence: string[];
+  link?: 'ports' | 'postgres' | 'users' | 'docker' | 'processes';
+  fixCommand?: string;
+  process?: { pid: number; exe: string; user: string; name: string; cpu: number };
+  file?: string;
+}
+
+export interface SecurityTool {
+  id: string;
+  name: string;
+  what: string;
+  pkg: string;
+  installed: boolean;
+}
+
+export function securityScan(): Promise<{ time: number; findings: SecurityFinding[] }> {
+  return request('/security/scan');
+}
+
+export function securityTools(): Promise<{ tools: SecurityTool[] }> {
+  return request('/security/tools');
+}
+
+export function securityInstallTool(id: string): Promise<{ log: StepResult[] }> {
+  return request(`/security/tools/${id}/install`, { method: 'POST' });
+}
+
+export function securityRunTool(id: string): Promise<{ ok: boolean; output: string; seconds: number }> {
+  return request(`/security/tools/${id}/run`, { method: 'POST' });
+}
+
+export function securityKill(pid: number): Promise<{ output: string }> {
+  return request('/security/kill', { method: 'POST', body: json({ pid }) });
+}
+
+export function securityQuarantine(path: string): Promise<{ dest: string }> {
+  return request('/security/quarantine', { method: 'POST', body: json({ path }) });
+}
+
+export function securityUninstallTool(id: string): Promise<{ log: StepResult[] }> {
+  return request(`/security/tools/${id}/uninstall`, { method: 'POST' });
+}
+
+// -------------------------------------------------------------- SSH 2FA
+
+export interface TwoFactorUser {
+  name: string;
+  uid: number;
+  home: string;
+  hasSecret: boolean;
+  sudo: boolean;
+  email: string;
+  enabledAt: number | null;
+}
+
+export interface TwoFactorStatus {
+  installed: boolean;
+  enforced: boolean;
+  supportsDropins: boolean;
+  sshd: Record<string, string>;
+  rootLoginClosedBySsher: boolean;
+  connectedAs: string;
+  users: TwoFactorUser[];
+}
+
+export function twoFactorStatus(): Promise<TwoFactorStatus> {
+  return request('/2fa/status');
+}
+
+export function twoFactorInstall(): Promise<{ log: StepResult[] }> {
+  return request('/2fa/install', { method: 'POST' });
+}
+
+export function twoFactorSetup(user: string, email: string): Promise<{ secret: string; scratch: string[]; otpauth: string }> {
+  return request('/2fa/setup', { method: 'POST', body: json({ user, email }) });
+}
+
+export function twoFactorConfirm(user: string, code: string): Promise<{ ok: true }> {
+  return request('/2fa/confirm', { method: 'POST', body: json({ user, code }) });
+}
+
+export function twoFactorEmail(user: string, email: string): Promise<{ ok: true }> {
+  return request('/2fa/email', { method: 'POST', body: json({ user, email }) });
+}
+
+export function twoFactorRemove(user: string): Promise<{ ok: true }> {
+  return request('/2fa/remove', { method: 'POST', body: json({ user }) });
+}
+
+export function twoFactorEnforce(enabled: boolean, testUser?: string, testPassword?: string): Promise<{ log: StepResult[] }> {
+  return request('/2fa/enforce', { method: 'POST', body: json({ enabled, testUser, testPassword }) });
+}
+
+export function rootLogin(allow: boolean, testUser?: string, testPassword?: string): Promise<{ log: StepResult[] }> {
+  return request('/2fa/root-login', { method: 'POST', body: json({ allow, testUser, testPassword }) });
+}
+
+// ------------------------------------------------------- database transfer
+
+export interface TransferTarget {
+  host: string;
+  port: number;
+  user: string;
+  password: string;
+  sslmode?: 'prefer' | 'require' | 'disable';
+}
+
+export function postgresTransferTest(
+  target: TransferTarget & { targetDb: string },
+): Promise<{ ok: true; targetVersion: string; sourceVersion: string; canCreateDb: boolean; exists: boolean }> {
+  return request('/postgres/transfer/test', { method: 'POST', body: json(target) });
+}
+
+export function postgresTransfer(
+  spec: TransferTarget & { sourceDb: string; targetDb: string; ifExists: 'stop' | 'replace' },
+): Promise<{ log: StepResult[]; seconds: number; bytes: number }> {
+  return request('/postgres/transfer', { method: 'POST', body: json(spec) });
+}
+
+export interface DbSummary {
+  schemas: number;
+  tables: number;
+  views: number;
+  matviews: number;
+  sequences: number;
+  indexes: number;
+  functions: number;
+  procedures: number;
+  triggers: number;
+  extensions: number;
+  rows: number;
+  bytes: number;
+}
+
+export function postgresDbSummary(db: string): Promise<{ summary: DbSummary }> {
+  return request(`/postgres/transfer/summary?db=${encodeURIComponent(db)}`);
 }

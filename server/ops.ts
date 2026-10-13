@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { createReadStream, promises as fs } from 'node:fs';
 import posix from 'node:path/posix';
 import type { Express, NextFunction, Request, RequestHandler, Response } from 'express';
-import { exec, execWithInput, shellQuote, type ExecResult, type SshSession } from './ssh.js';
+import { exec, execWithInput, shellQuote, sudoPrefix, type ExecResult, type SshSession } from './ssh.js';
 import { advanceTransfer, finishTransfer, startTransfer } from './transfers.js';
 
 export interface SessionRequest extends Request {
@@ -18,13 +18,15 @@ export type AsyncRoute = (
 
 // ------------------------------------------------------------------ helpers
 
-/** Non-root logins go through `sudo -n` (fails fast instead of hanging on a password prompt). */
+/** Non-root logins go through sudo: `sudo -S` with the session's stored password when
+ *  there is one, else `sudo -n`, which fails fast ("a password is required") instead of
+ *  hanging on a prompt — the client turns that error into a password dialog. */
 export function asRoot(session: SshSession, command: string): string {
-  return session.username === 'root' ? command : `sudo -n sh -c ${shellQuote(command)}`;
+  return session.username === 'root' ? command : `${sudoPrefix(session)} sh -c ${shellQuote(command)}`;
 }
 
-export async function run(session: SshSession, command: string): Promise<ExecResult> {
-  return exec(session, asRoot(session, command));
+export async function run(session: SshSession, command: string, quiet = false): Promise<ExecResult> {
+  return exec(session, asRoot(session, command), quiet);
 }
 
 export async function runOrThrow(session: SshSession, command: string): Promise<string> {
@@ -52,9 +54,12 @@ export async function execMaybeRootOrThrow(session: SshSession, command: string,
 }
 
 export async function writeRemote(session: SshSession, path: string, content: string): Promise<void> {
+  // Create the folder first: `tee` won't, and a step that pairs `mkdir … && tee` in its
+  // command never runs that command — runSteps writes `file` steps through here instead.
+  const dir = path.slice(0, path.lastIndexOf('/')) || '/';
   const result = await execWithInput(
     session,
-    asRoot(session, `tee ${shellQuote(path)} >/dev/null`),
+    asRoot(session, `mkdir -p ${shellQuote(dir)} && tee ${shellQuote(path)} >/dev/null`),
     content,
   );
   if (result.code !== 0) throw new Error(result.stderr.trim() || `could not write ${path}`);
@@ -131,6 +136,8 @@ export interface Container {
   imageId: string;
   /** Loaded from a file (`docker load`), not pulled — so there is no registry to pull updates from. */
   imageLocal: boolean;
+  pid: number;
+  logPath: string;
   state: string;
   running: boolean;
   health: string | null;
@@ -155,8 +162,9 @@ interface Inspect {
   Image: string;
   Name: string;
   Created: string;
+  LogPath?: string;
   Config: { Image: string; Labels: Record<string, string> | null };
-  State: { Status: string; Running: boolean; StartedAt: string; Health?: { Status: string } };
+  State: { Status: string; Running: boolean; StartedAt: string; Pid?: number; Health?: { Status: string } };
   HostConfig: { RestartPolicy?: { Name: string } };
   NetworkSettings: {
     Ports: Record<string, { HostIp: string; HostPort: string }[] | null> | null;
@@ -183,6 +191,11 @@ function toContainer(c: Inspect): Container {
     image: c.Config.Image,
     imageId: c.Image,
     imageLocal: false,
+    // The container's main process on the host: /proc/<pid>/root is its whole
+    // filesystem, whatever storage driver Docker uses. 0 when it isn't running.
+    pid: c.State.Pid ?? 0,
+    // Docker's own copy of the container's stdout/stderr (what `docker logs` reads).
+    logPath: c.LogPath ?? '',
     state: c.State.Status,
     running: c.State.Running,
     health: c.State.Health?.Status ?? null,
@@ -1022,6 +1035,29 @@ export function registerOps(
         return;
       }
       res.json({ ok: true, log, dir: spec.dir, url: spec.domain ? `http://${spec.domain.split(/\s+/)[0]}` : '' });
+    }),
+  );
+
+  // --------------------------------------------------------------------- disk
+
+  /** Size / used / free of every real filesystem (no tmpfs, overlay, snap mounts). */
+  app.get(
+    '/api/system/disk',
+    requireSession,
+    route(async (req, res) => {
+      const out = await exec(
+        req.session!,
+        'df -B1 -x tmpfs -x devtmpfs -x overlay -x squashfs -x efivarfs --output=source,fstype,size,used,avail,target 2>/dev/null | tail -n +2',
+      );
+      const disks = out.stdout
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => {
+          const [source, fstype, size, used, avail, ...mount] = line.trim().split(/\s+/);
+          return { source, fstype, size: Number(size), used: Number(used), avail: Number(avail), mount: mount.join(' ') };
+        })
+        .filter((d) => d.size > 0 && !d.mount.startsWith('/boot/efi'));
+      res.json({ disks });
     }),
   );
 
