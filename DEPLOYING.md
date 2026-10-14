@@ -4,10 +4,16 @@ SSHer runs on the server as two containers:
 
 | Container | What it is | Port on the server | Port inside | Built from |
 | --- | --- | --- | --- | --- |
-| `ssher-web` | The UI (nginx). Forwards `/api` to `ssher-api` | **7000** | 80 | `client/` → `ssher-web.tar` |
-| `ssher-api` | The Node back end that does the SSH work | **7001** | 3001 | `server/` → `ssher-api.tar` |
+| `ssher-web` | The UI (nginx). Forwards `/api` to the API at **https://app.ssh.com.ly** | **7000** | 80 | `client/` → `ssher-web.tar` |
+| `ssher-api` | The Node back end that does the SSH work. Served at **app.ssh.com.ly** | **7001** | 3001 | `server/` → `ssher-api.tar` |
 
 You open **http://102.203.201.222:7000**.
+
+The web container's nginx reaches the API through its public https domain,
+`https://app.ssh.com.ly`, not through the server's ports. The browser only talks to
+`ssher-web`, so it needs no CORS settings. To point it somewhere else, set
+`API_UPSTREAM` on `ssher-web`, e.g. `http://host.docker.internal:7001` to go straight to
+the API container on the same server.
 
 You deploy and update both containers from the SSHer you run **on your own PC**
 (`npm start` → http://localhost:5173), by dragging `.tar` files onto its Docker page.
@@ -60,13 +66,25 @@ The upload runs, then the deploy wizard opens.
 | 4. Environment | **+ Add** → key `SSHER_ACCESS_KEY`, value: a long random password. **Write it down.** **Next** |
 | 5. Review | Check the file, then **Deploy** |
 
+Then put the API on its domain:
+
+1. In Cloudflare, add an **A** record `app` → `102.203.201.222`, **Proxied** (orange cloud).
+   Cloudflare provides the https.
+2. In SSHer go to **Nginx** → add a site: domain **`app.ssh.com.ly`**, target
+   **`127.0.0.1:7001`**, max body size `0` (unlimited, for big uploads).
+3. Check that https://app.ssh.com.ly/api/health returns `{"ok":true,"service":"ssher-api",...}`.
+   Do this before deploying the front end. Its nginx looks up `app.ssh.com.ly` when it starts.
+
+> Cloudflare's free plan rejects request bodies over **100 MB**. Uploads larger than that
+> fail when they go through app.ssh.com.ly.
+
 ### 2b. Front end: drag `ssher-web.tar`
 
 | Wizard step | Enter |
 | --- | --- |
 | 2. Basics | Name **`ssher-web`** |
 | 3. Network | **Public port**. Container port **80**, server port **7000**. Tick the ufw box |
-| 4. Environment | ✅ Tick **"Needs a database or service running on the host?"** (required: this is how the front end reaches the API on 7001; without it, nginx won't start). No variables |
+| 4. Environment | Nothing to add. `API_UPSTREAM` is already `https://app.ssh.com.ly`. (Only if you set it to `http://host.docker.internal:7001` instead: tick **"Needs a database or service running on the host?"**, or nginx won't start) |
 | 5. Review | **Deploy** |
 
 ### 2c. Check it
@@ -79,6 +97,7 @@ To check each piece on its own, open these in the browser. None of them needs th
 | URL | Proves | Expected |
 | --- | --- | --- |
 | http://102.203.201.222:7001/api/health | The API container is up | `{"ok":true,"service":"ssher-api",...}` |
+| https://app.ssh.com.ly/api/health | The API's domain works | Same as above |
 | http://102.203.201.222:7000/healthz | The web container is up | `{"ok":true,"service":"ssher-web",...}` |
 | http://102.203.201.222:7000/api/health | Web can reach the API | Same as the first one. A **502** means web is up but can't reach the API |
 
@@ -144,8 +163,8 @@ always deploy again from step 2.
 | Symptom | Cause / fix |
 | --- | --- |
 | `npm run docker:images` fails with "failed to connect to the docker API" | Docker Desktop isn't running. Start it and wait until it says *Engine running* |
-| :7000 doesn't load at all | `ssher-web` isn't running. Check its **Logs** tab. "host not found: host.docker.internal" means the host-service box (2b, step 4) wasn't ticked. Remove the app and deploy again with the box ticked |
-| Page loads, but everything fails or says "Request failed (502)" | `ssher-api` is down or not on 7001. Check its status and logs on the Docker page |
+| :7000 doesn't load at all | `ssher-web` isn't running. Check its **Logs** tab. "host not found in upstream app.ssh.com.ly" means the API's DNS record isn't set up yet (2a). Fix it, then restart `ssher-web` |
+| Page loads, but everything fails or says "Request failed (502)" | The API isn't reachable at https://app.ssh.com.ly. Open https://app.ssh.com.ly/api/health. If that fails, check the `ssher-api` container, the nginx site, and the Cloudflare record |
 | Keeps asking for the access key | The key is wrong. Check `SSHER_ACCESS_KEY` in `/opt/ssher-api/docker-compose.yml` (Config tab) |
 | After an update the UI looks unchanged | Hard-reload the page with Ctrl+F5 |
 | Dropping the `.tar` opens the wizard instead of "New build loaded" | The image name changed, or the app was removed. Use the wizard (step 2) |
@@ -153,9 +172,9 @@ always deploy again from step 2.
 ## Security notes
 
 - `http://IP:7000` is **not encrypted**: SSH passwords and the access key cross the
-  internet in plain text. For real use, put the UI behind a Cloudflare-proxied domain:
-  in the wizard choose **Domain via nginx** for `ssher-web`, and **Server only** for
-  `ssher-api`. The front end then needs to reach the API another way; ask before you switch.
+  internet in plain text. The web container already reaches the API over https. To make
+  the UI itself https, give `ssher-web` a Cloudflare-proxied domain too, the same way as
+  the API in 2a (Nginx site → `127.0.0.1:7000`). Nothing in the images needs to change.
 - Ports published by Docker get past ufw, so 7000 and 7001 are reachable from anywhere
   while the app is deployed. The access key is the only thing protecting them, so make it
   long.
