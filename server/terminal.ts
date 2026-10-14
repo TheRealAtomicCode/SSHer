@@ -76,9 +76,23 @@ async function bridge(ws: WebSocket, session: Parameters<typeof openShell>[0], c
     stream.on('data', relay);
     stream.stderr.on('data', relay);
 
+    // Proxies drop a WebSocket that stays silent — Cloudflare after ~100 s, nginx
+    // after its proxy_read_timeout — so an idle terminal would disconnect. A ping
+    // (the browser answers it by itself) keeps it open without counting as
+    // activity: the 30-minute idle sweep still applies.
+    const keepAlive = setInterval(() => {
+      if (ws.readyState === ws.OPEN) ws.ping();
+    }, 30_000);
+
     stream.on('close', () => ws.close());
-    ws.on('close', () => stream.end());
-    ws.on('error', () => stream.end());
+    ws.on('close', () => {
+      clearInterval(keepAlive);
+      stream.end();
+    });
+    ws.on('error', () => {
+      clearInterval(keepAlive);
+      stream.end();
+    });
   } catch (err) {
     ws.close(1011, (err as Error).message.slice(0, 120));
   }

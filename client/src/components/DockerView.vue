@@ -3,7 +3,8 @@ import { computed, onMounted, ref, watch } from 'vue';
 import * as api from '../api';
 import { ApiError } from '../api';
 import { fail, notify } from '../toast';
-import { newTransferId, watchTransfer } from '../transferProgress';
+import { isCancelled, trackUpload } from '../backgroundTasks';
+import { newTransferId } from '../transferProgress';
 import type { ComposeInfo, ComposeOp, Container, DockerImage, RemoteFile, Session, StepResult } from '../types';
 import DeployWizard from './DeployWizard.vue';
 import ContainerNetwork from './ContainerNetwork.vue';
@@ -54,8 +55,6 @@ function deployInstead() {
 }
 
 const dropping = ref(false);
-const loadProgress = ref<number | null>(null);
-const loadStage = ref('');
 let dragDepth = 0;
 
 // ------------------------------------------------------------------- data
@@ -331,35 +330,13 @@ async function loadImageFile(file: File) {
     fail(new Error(`${file.name} is not an image archive. Drop the .tar (or .tar.gz) made by: docker save -o app.tar your-image:tag`));
     return;
   }
-  loadProgress.value = 0;
-  loadStage.value = `Uploading ${file.name} (${(file.size / 1e6).toFixed(0)} MB)`;
   const transferId = newTransferId();
-  let watching = false;
-  let stopWatch = () => {};
+  // Progress (and the cancel button) live in the background-tasks tray, which also
+  // picks the job up again if the page is reloaded mid-way.
+  const task = trackUpload(transferId, file.name, 'docker load');
   try {
-    const res = await api.dockerLoad(
-      file,
-      (p) => {
-        loadProgress.value = p;
-        // The browser's own progress only covers getting the file to this
-        // server — for a multi-GB image the relay on to the actual remote
-        // target afterward is often the slower, previously invisible part.
-        if (p >= 100 && !watching) {
-          watching = true;
-          loadStage.value = 'Copying to the server…';
-          loadProgress.value = 0;
-          stopWatch = watchTransfer(transferId, (state) => {
-            if (state.done && !state.error) {
-              loadStage.value = 'Running docker load…';
-              loadProgress.value = 100;
-              return;
-            }
-            loadProgress.value = state.total ? Math.round((state.transferred / state.total) * 100) : 0;
-          });
-        }
-      },
-      transferId,
-    );
+    const res = await api.dockerLoad(file, task.progress, transferId, task.signal);
+    task.settle();
     if (!res.images.length) throw new Error(`docker load did not report an image:\n${res.output}`);
     notify(`Loaded ${res.images.join(', ')}`);
     await refresh();
@@ -368,10 +345,9 @@ async function loadImageFile(file: File) {
     if (running.length) updateChoice.value = { image: res.images[0], containers: running };
     else wizard.value = { image: res.images[0], source: 'loaded' };
   } catch (err) {
-    fail(err);
-  } finally {
-    stopWatch();
-    loadProgress.value = null;
+    task.settle(err);
+    if (isCancelled(err)) notify(`Cancelled ${file.name}`);
+    else fail(err);
   }
 }
 
@@ -852,23 +828,6 @@ const btn = 'rounded-md p-1.5 text-slate-400 transition hover:bg-slate-800 hover
         <v-icon name="fa-docker" scale="3" class="text-sky-400" />
         <p class="mt-3 text-base font-semibold text-white">Drop the image to deploy it</p>
         <p class="mt-1 text-xs text-slate-400">.tar / .tar.gz from docker save</p>
-      </div>
-    </div>
-
-    <div
-      v-if="loadProgress !== null"
-      class="fixed bottom-4 left-1/2 z-40 w-96 -translate-x-1/2 rounded-xl border border-slate-700 bg-slate-900 p-3 shadow-2xl"
-    >
-      <div class="mb-1.5 flex justify-between gap-2 text-xs text-slate-400">
-        <span class="truncate">{{ loadStage }}</span>
-        <span class="tabular-nums">{{ loadProgress }}%</span>
-      </div>
-      <div class="h-1.5 overflow-hidden rounded-full bg-slate-800">
-        <div
-          class="h-full rounded-full bg-sky-500 transition-all duration-200"
-          :class="loadProgress >= 100 && 'animate-pulse'"
-          :style="{ width: `${loadProgress}%` }"
-        />
       </div>
     </div>
 

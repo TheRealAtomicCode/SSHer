@@ -302,6 +302,12 @@ export interface NginxSite {
   domains: string[];
   target: string;
   maxBody: string;
+  /** Has a `listen 443`, whoever wrote it. */
+  https: boolean;
+  /** The SSHer-stored certificate it uses, if any. */
+  tlsCert: string;
+  /** Only accepts https from Cloudflare (Authenticated Origin Pulls). */
+  originPull: boolean;
 }
 
 export interface NginxSiteSpec {
@@ -310,6 +316,17 @@ export interface NginxSiteSpec {
   target: string;
   maxBody: string;
   overwrite: boolean;
+  /** Name of a stored certificate — '' serves plain http only. */
+  tlsCert: string;
+  originPull: boolean;
+}
+
+export interface NginxCert {
+  name: string;
+  domains: string[];
+  issuer: string;
+  /** ISO date, '' if unreadable. */
+  expires: string;
 }
 
 export interface LocalApp {

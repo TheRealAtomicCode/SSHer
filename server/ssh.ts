@@ -55,7 +55,7 @@ export function sudoPrefix(session: SshSession, args = ''): string {
 
 /** One password line per `sudo -S` in the command. A sudo that finds a still-valid
  *  timestamp doesn't read its line, which is harmless for the commands we run. */
-function sudoStdin(session: SshSession, command: string): string {
+export function sudoStdin(session: SshSession, command: string): string {
   if (!session.sudoPassword) return '';
   const count = command.split(SUDO_STDIN).length - 1;
   return `${session.sudoPassword}\n`.repeat(count);

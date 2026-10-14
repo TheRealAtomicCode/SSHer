@@ -18,7 +18,8 @@ export function newTransferId(): string {
  *  the server reports `done`. */
 export function watchTransfer(
   transferId: string,
-  onUpdate: (state: { total: number; transferred: number; done: boolean; error: string }) => void,
+  /** `pending`: the file hasn't reached SSHer's server yet — a proxy in between is still holding it. */
+  onUpdate: (state: { total: number; transferred: number; done: boolean; error: string; pending?: boolean }) => void,
 ): () => void {
   let stopped = false;
   let timer: ReturnType<typeof setTimeout> | undefined;

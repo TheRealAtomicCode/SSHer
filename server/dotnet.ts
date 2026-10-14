@@ -10,7 +10,7 @@
 // tag `docker load` produced).
 import posix from 'node:path/posix';
 import { randomUUID } from 'node:crypto';
-import { createReadStream, promises as fs } from 'node:fs';
+import { promises as fs } from 'node:fs';
 import type { Express, Response } from 'express';
 import {
   badRequestRoute,
@@ -20,6 +20,7 @@ import {
   renderNginxSite,
   RE,
   run,
+  runCancellable,
   runOrThrow,
   runSteps,
   str,
@@ -29,7 +30,7 @@ import {
   type StepResult,
 } from './ops.js';
 import { readFile, shellQuote, type SshSession } from './ssh.js';
-import { advanceTransfer, finishTransfer, startTransfer } from './transfers.js';
+import { copyFinished, finishTransfer, sftpUpload, startTransfer } from './transfers.js';
 
 const STAGING_RE = /^\/tmp\/ssher-dotnet-[0-9a-f-]+$/;
 const UNIT_DIR = '/etc/systemd/system';
@@ -214,21 +215,18 @@ export function registerDotnet(
 
       const stagingDir = `/tmp/ssher-dotnet-${randomUUID()}`;
       const remoteZip = `${stagingDir}.zip`;
-      const transferId = str(req.body?.transferId);
-      if (transferId) startTransfer(transferId, file.size);
-      let sent = 0;
+      const transferId = str(req.body?.transferId) || randomUUID();
+      const signal = startTransfer(transferId, file.size, { sessionId: session.id, label: file.originalname, processing: 'unzip' });
       try {
-        await new Promise<void>((resolve, reject) => {
-          const readStream = createReadStream(file.path);
-          const writeStream = session.sftp.createWriteStream(remoteZip);
-          if (transferId) readStream.on('data', (chunk: string | Buffer) => advanceTransfer(transferId, (sent += chunk.length)));
-          readStream.on('error', reject);
-          writeStream.on('error', reject);
-          writeStream.on('close', resolve);
-          readStream.pipe(writeStream);
-        });
-        if (transferId) finishTransfer(transferId);
-        await runOrThrow(session, `mkdir -p ${shellQuote(stagingDir)} && unzip -o -q ${shellQuote(remoteZip)} -d ${shellQuote(stagingDir)}`);
+        await sftpUpload(session, file.path, remoteZip, { id: transferId, signal });
+        copyFinished(transferId);
+        const unzipped = await runCancellable(
+          session,
+          `mkdir -p ${shellQuote(stagingDir)} && unzip -o -q ${shellQuote(remoteZip)} -d ${shellQuote(stagingDir)} 2>&1`,
+          signal,
+        );
+        need(unzipped.code === 0, (unzipped.stdout + unzipped.stderr).trim() || 'unzip failed');
+        finishTransfer(transferId);
 
         const mainDll = await findMainDll(session, stagingDir);
         if (!mainDll) {
@@ -264,7 +262,8 @@ export function registerDotnet(
           compatible,
         });
       } catch (err) {
-        if (transferId) finishTransfer(transferId, (err as Error).message);
+        finishTransfer(transferId, (err as Error).message);
+        if (signal.aborted) await run(session, `rm -rf ${shellQuote(stagingDir)}`).catch(() => {});
         throw err;
       } finally {
         await fs.unlink(file.path).catch(() => {});

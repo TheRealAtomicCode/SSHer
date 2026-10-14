@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue';
+import { computed, onMounted, reactive, ref } from 'vue';
 import * as api from '../api';
 import { ApiError } from '../api';
-import type { NginxSite, NginxSiteSpec, StepResult } from '../types';
+import { fail } from '../toast';
+import type { NginxCert, NginxSite, NginxSiteSpec, StepResult } from '../types';
 
 const props = defineProps<{
   prefill?: Partial<NginxSiteSpec>;
@@ -16,8 +17,66 @@ const spec = reactive<NginxSiteSpec>({
   domain: props.prefill?.domain ?? '',
   target: props.prefill?.target ?? '',
   maxBody: props.prefill?.maxBody || '100m',
-  overwrite: false,
+  overwrite: props.prefill?.overwrite ?? false,
+  tlsCert: props.prefill?.tlsCert ?? '',
+  originPull: props.prefill?.originPull ?? false,
 });
+/** Opened from an existing site's settings button: same name, rewritten in place. */
+const editing = Boolean(props.prefill?.overwrite);
+
+// ------------------------------------------------------------------- https
+
+const certs = ref<NginxCert[]>([]);
+const https = ref(Boolean(spec.tlsCert));
+const addingCert = ref(false);
+const savingCert = ref(false);
+const newCert = reactive({ name: '', cert: '', key: '' });
+
+onMounted(async () => {
+  try {
+    certs.value = (await api.nginxCerts()).certs;
+    if (https.value && !spec.tlsCert && certs.value.length) spec.tlsCert = certs.value[0].name;
+  } catch (err) {
+    fail(err);
+  }
+});
+
+function setHttps(on: boolean) {
+  https.value = on;
+  if (on && !spec.tlsCert && certs.value.length) spec.tlsCert = certs.value[0].name;
+  if (on && !certs.value.length) addingCert.value = true;
+}
+
+/** `*.example.com` covers `app.example.com` but not `example.com` or `a.b.example.com`. */
+function covers(pattern: string, host: string): boolean {
+  if (pattern === host) return true;
+  return pattern.startsWith('*.') && host.endsWith(pattern.slice(1)) && !host.slice(0, -pattern.length + 1).includes('.');
+}
+
+const selectedCert = computed(() => certs.value.find((c) => c.name === spec.tlsCert) ?? null);
+const uncovered = computed(() => {
+  const cert = selectedCert.value;
+  if (!https.value || !cert || !cert.domains.length) return [];
+  return spec.domain.trim().split(/\s+/).filter((d) => d && !cert.domains.some((p) => covers(p, d)));
+});
+
+async function saveCert() {
+  savingCert.value = true;
+  try {
+    const name = newCert.name.trim();
+    certs.value = (await api.nginxAddCert({ name, cert: newCert.cert, key: newCert.key })).certs;
+    spec.tlsCert = name;
+    addingCert.value = false;
+    Object.assign(newCert, { name: '', cert: '', key: '' });
+  } catch (err) {
+    fail(err);
+  } finally {
+    savingCert.value = false;
+  }
+}
+const certFormOk = computed(
+  () => /^[a-z0-9][a-z0-9_-]{0,62}$/.test(newCert.name.trim()) && newCert.cert.includes('BEGIN CERTIFICATE') && /BEGIN (RSA |EC )?PRIVATE KEY/.test(newCert.key),
+);
 
 const submitting = ref(false);
 const result = ref<{ log: StepResult[]; error: string; done: boolean } | null>(null);
@@ -26,14 +85,20 @@ const showRaw = ref(false);
 const nameOk = computed(() => /^[a-z0-9][a-z0-9_-]{0,62}$/.test(spec.name));
 const domainOk = computed(() => spec.domain.trim().split(/\s+/).every((d) => /^(?=.{1,253}$)(\*\.)?([A-Za-z0-9-]+\.)+[A-Za-z]{2,}$/.test(d)));
 const targetOk = computed(() => /^[A-Za-z0-9][A-Za-z0-9.-]*:\d{1,5}$/.test(spec.target));
-const canSubmit = computed(() => nameOk.value && domainOk.value && targetOk.value && !submitting.value);
+const canSubmit = computed(
+  () => nameOk.value && domainOk.value && targetOk.value && (!https.value || Boolean(spec.tlsCert)) && !submitting.value,
+);
 
 async function submit() {
   if (!canSubmit.value) return;
   submitting.value = true;
   result.value = { log: [], error: '', done: false };
   try {
-    const res = await api.nginxAddSite(spec);
+    const res = await api.nginxAddSite({
+      ...spec,
+      tlsCert: https.value ? spec.tlsCert : '',
+      originPull: https.value && spec.originPull,
+    });
     result.value = { log: res.log, error: '', done: true };
     emit('created', res.site);
   } catch (err) {
@@ -58,7 +123,7 @@ const hint = 'mt-1 text-[11px] text-slate-500';
     <div class="flex max-h-[90vh] w-full max-w-lg flex-col rounded-2xl border border-slate-700 bg-slate-900 shadow-2xl">
       <div class="flex items-center gap-2 border-b border-slate-800 px-5 py-3.5">
         <v-icon name="fa-globe" class="text-emerald-400" />
-        <h2 class="flex-1 text-base font-semibold text-white">Add an nginx site</h2>
+        <h2 class="flex-1 text-base font-semibold text-white">{{ editing ? `Site settings — ${spec.name}` : 'Add an nginx site' }}</h2>
         <button
           v-if="!submitting"
           class="rounded-md p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white"
@@ -72,7 +137,7 @@ const hint = 'mt-1 text-[11px] text-slate-500';
         <template v-if="!result">
           <div>
             <label :class="label">Site name</label>
-            <input v-model="spec.name" :class="[field, 'font-mono']" placeholder="myapp" />
+            <input v-model="spec.name" :class="[field, 'font-mono']" placeholder="myapp" :disabled="editing" />
             <p :class="hint">Becomes /etc/nginx/sites-available/{{ spec.name || '…' }}</p>
           </div>
           <div>
@@ -88,9 +153,77 @@ const hint = 'mt-1 text-[11px] text-slate-500';
             <div>
               <label :class="label">Max upload</label>
               <input v-model="spec.maxBody" :class="[field, 'font-mono']" placeholder="100m" />
+              <p :class="hint">0 = no limit</p>
             </div>
           </div>
-          <label class="flex items-center gap-2 text-xs text-amber-300">
+
+          <!-- HTTPS -->
+          <div class="rounded-xl border border-slate-800 bg-slate-950/40 p-3">
+            <label class="flex items-center gap-2 text-sm text-white">
+              <input :checked="https" type="checkbox" class="accent-emerald-500" @change="setHttps(($event.target as HTMLInputElement).checked)" />
+              <v-icon name="fa-lock" scale="0.75" class="text-emerald-400" />
+              Serve HTTPS from this server
+            </label>
+            <p :class="hint">
+              Encrypts the hop between Cloudflare and this server too, so nobody on the network in between can read it.
+              Port 80 then only redirects to https. Set Cloudflare's SSL/TLS mode to <b class="text-slate-300">Full (strict)</b>.
+            </p>
+
+            <div v-if="https" class="mt-3 space-y-3">
+              <div v-if="certs.length && !addingCert">
+                <label :class="label">Certificate</label>
+                <div class="flex gap-2">
+                  <select v-model="spec.tlsCert" :class="[field, 'font-mono']">
+                    <option v-for="c in certs" :key="c.name" :value="c.name">
+                      {{ c.name }} — {{ c.domains.join(', ') || 'no names' }}
+                    </option>
+                  </select>
+                  <button class="shrink-0 rounded-lg border border-slate-700 px-3 text-xs text-slate-300 hover:bg-slate-800" @click="addingCert = true">
+                    + New
+                  </button>
+                </div>
+                <p v-if="selectedCert" :class="hint">
+                  {{ selectedCert.issuer }}<template v-if="selectedCert.expires">, valid until {{ selectedCert.expires.slice(0, 10) }}</template>
+                </p>
+                <p v-if="uncovered.length" class="mt-1 text-[11px] text-amber-300">
+                  This certificate doesn't cover {{ uncovered.join(', ') }} — Full (strict) will reject it.
+                </p>
+              </div>
+
+              <div v-if="addingCert" class="space-y-2 rounded-lg border border-emerald-900/50 bg-emerald-950/20 p-3">
+                <p class="text-xs text-slate-300">
+                  In Cloudflare: <b>SSL/TLS → Origin Server → Create Certificate</b> (keep <span class="font-mono">yourdomain</span> and
+                  <span class="font-mono">*.yourdomain</span>, 15 years). Paste both parts below. The key is shown only once there.
+                </p>
+                <input v-model="newCert.name" :class="[field, 'font-mono']" placeholder="certificate name, e.g. ssh-com-ly" />
+                <textarea v-model="newCert.cert" :class="[field, 'h-20 font-mono text-[11px]']" placeholder="-----BEGIN CERTIFICATE-----" />
+                <textarea v-model="newCert.key" :class="[field, 'h-20 font-mono text-[11px]']" placeholder="-----BEGIN PRIVATE KEY-----" />
+                <p :class="hint">Stored in /etc/ssl/ssher, readable by root only. Checked that the key matches the certificate.</p>
+                <div class="flex justify-end gap-2">
+                  <button v-if="certs.length" class="rounded-lg px-3 py-1.5 text-xs text-slate-400 hover:bg-slate-800" @click="addingCert = false">Cancel</button>
+                  <button
+                    :disabled="!certFormOk || savingCert"
+                    class="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-40"
+                    @click="saveCert"
+                  >
+                    {{ savingCert ? 'Saving…' : 'Save certificate' }}
+                  </button>
+                </div>
+              </div>
+
+              <label v-if="spec.tlsCert && !addingCert" class="flex items-start gap-2 text-xs text-slate-300">
+                <input v-model="spec.originPull" type="checkbox" class="mt-0.5 accent-emerald-500" />
+                <span>
+                  Only accept connections from Cloudflare (Authenticated Origin Pulls)
+                  <span class="block text-[11px] text-amber-300/80">
+                    Turn on SSL/TLS → Origin Server → Authenticated Origin Pulls in Cloudflare at the same time, or the site stops answering.
+                  </span>
+                </span>
+              </label>
+            </div>
+          </div>
+
+          <label v-if="!editing" class="flex items-center gap-2 text-xs text-amber-300">
             <input v-model="spec.overwrite" type="checkbox" class="accent-amber-500" />
             Overwrite if {{ spec.name || 'this name' }} already exists
           </label>
@@ -128,7 +261,7 @@ const hint = 'mt-1 text-[11px] text-slate-500';
             <p class="flex items-center gap-2 font-medium">
               <v-icon name="fa-check-circle" /> {{ spec.name }} is live.
             </p>
-            <p class="mt-1">Once DNS points here: <span class="font-mono text-white">http://{{ spec.domain.split(/\s+/)[0] }}</span></p>
+            <p class="mt-1">Once DNS points here: <span class="font-mono text-white">{{ https ? 'https' : 'http' }}://{{ spec.domain.split(/\s+/)[0] }}</span></p>
           </div>
         </template>
       </div>
@@ -144,7 +277,7 @@ const hint = 'mt-1 text-[11px] text-slate-500';
             class="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-40"
             @click="submit"
           >
-            Create site
+            {{ editing ? 'Save & reload' : 'Create site' }}
           </button>
         </template>
         <button

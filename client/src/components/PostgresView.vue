@@ -143,6 +143,18 @@ const dbDetail = ref<PostgresDatabase | null>(null);
 const dbOwner = ref('');
 const dbDropConfirm = ref('');
 
+// ------------------------------------------------------------- backups (download)
+
+const dumpFormat = ref<'custom' | 'sql'>('custom');
+
+/** Starts the browser's own download — progress and cancel live in its downloads list. */
+function downloadDump(db?: string) {
+  const link = document.createElement('a');
+  link.href = api.postgresDumpUrl({ db, format: db ? dumpFormat.value : 'sql' });
+  link.click();
+  notify(db ? `Downloading ${db}…` : 'Downloading all databases…');
+}
+
 function openDatabase(d: PostgresDatabase) {
   dbDetail.value = d;
   dbOwner.value = d.owner;
@@ -924,19 +936,47 @@ const label = 'mb-1.5 block text-xs font-medium text-slate-400';
             <p class="mb-2 flex items-center gap-2 text-xs text-slate-400">
               <v-icon name="fa-database" scale="0.7" class="text-sky-300" /> Databases
               <span class="text-slate-600">· {{ formatSize(databases.reduce((n, d) => n + (d.bytes ?? 0), 0)) }} in total</span>
+              <span class="ml-auto flex items-center gap-2">
+                <select
+                  v-model="dumpFormat"
+                  class="rounded-md border border-slate-700 bg-slate-950 px-1.5 py-0.5 text-[11px] text-slate-300"
+                  title="Format of a single-database download"
+                >
+                  <option value="custom">.dump (pg_restore)</option>
+                  <option value="sql">.sql.gz (psql)</option>
+                </select>
+                <button
+                  class="flex items-center gap-1 rounded-md border border-slate-700 px-2 py-0.5 text-[11px] text-slate-300 hover:bg-slate-800 hover:text-white"
+                  title="Every database plus roles and passwords, as one gzipped SQL file (pg_dumpall)"
+                  @click="downloadDump()"
+                >
+                  <v-icon name="fa-download" scale="0.6" /> Download all
+                </button>
+              </span>
             </p>
             <div class="flex flex-wrap gap-1.5">
-              <button
+              <span
                 v-for="d in [...databases].sort((a, b) => (b.bytes ?? 0) - (a.bytes ?? 0))"
                 :key="d.name"
-                class="rounded-md bg-slate-800 px-2 py-1 text-[11px] transition hover:bg-slate-700"
-                :title="`Owner: ${d.owner} — click to change the owner or drop it`"
-                @click="openDatabase(d)"
+                class="flex items-stretch overflow-hidden rounded-md bg-slate-800 text-[11px]"
               >
-                <span class="font-mono text-slate-200">{{ d.name }}</span>
-                <span class="ml-1.5 text-slate-500">{{ d.owner }}</span>
-                <span class="ml-1.5 text-sky-300">{{ formatSize(d.bytes ?? 0) }}</span>
-              </button>
+                <button
+                  class="px-2 py-1 transition hover:bg-slate-700"
+                  :title="`Owner: ${d.owner} — click to change the owner or drop it`"
+                  @click="openDatabase(d)"
+                >
+                  <span class="font-mono text-slate-200">{{ d.name }}</span>
+                  <span class="ml-1.5 text-slate-500">{{ d.owner }}</span>
+                  <span class="ml-1.5 text-sky-300">{{ formatSize(d.bytes ?? 0) }}</span>
+                </button>
+                <button
+                  class="border-l border-slate-700 px-1.5 text-slate-400 transition hover:bg-sky-500/15 hover:text-sky-300"
+                  :title="`Download ${d.name} as ${dumpFormat === 'custom' ? '.dump — restore with pg_restore' : '.sql.gz — restore with psql'}`"
+                  @click="downloadDump(d.name)"
+                >
+                  <v-icon name="fa-download" scale="0.6" />
+                </button>
+              </span>
             </div>
           </div>
           <div

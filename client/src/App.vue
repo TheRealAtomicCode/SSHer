@@ -2,6 +2,8 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import * as api from './api';
 import ActivityLogPanel from './components/ActivityLogPanel.vue';
+import BackgroundTasks from './components/BackgroundTasks.vue';
+import { resumeTasks } from './backgroundTasks';
 import ConnectPanel from './components/ConnectPanel.vue';
 import DbTransferView from './components/DbTransferView.vue';
 import DockerView from './components/DockerView.vue';
@@ -37,6 +39,10 @@ async function copyToastMessage(message: string) {
 }
 
 const session = ref<Session | null>(null);
+// Uploads keep running server-side across a reload: pick them up again on (re)connect.
+watch(session, (s) => {
+  if (s) resumeTasks();
+});
 const connecting = ref(false);
 const connectError = ref('');
 const view = ref<View>('home');
@@ -564,6 +570,8 @@ const NAV: { view: View; label: string; icon: string; sub?: boolean }[] = [
     <ActivityLogPanel :open="activityOpen" @close="activityOpen = false" />
 
     <TerminalDock :open="terminalOpen" @close="terminalOpen = false" />
+
+    <BackgroundTasks v-if="session" />
 
     <!-- Bottom-right toasts. -->
     <div class="pointer-events-none fixed right-4 bottom-4 z-[60] space-y-2">

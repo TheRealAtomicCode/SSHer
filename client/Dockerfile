@@ -9,9 +9,15 @@
 #                  public https domain). To reach the API container's published port
 #                  on the same server instead, set http://host.docker.internal:7001 —
 #                  that needs the host.docker.internal -> host-gateway mapping.
+#
+# Base images: Alpine by default. `npm run docker:images -- --base debian` passes
+# NODE_IMAGE=node:22-bookworm-slim and NGINX_IMAGE=nginx:1.27 instead (Debian 12).
+
+ARG NODE_IMAGE=node:22-alpine
+ARG NGINX_IMAGE=nginx:1.27-alpine
 
 # ------------------------------------------------------------------ build
-FROM node:22-alpine AS build
+FROM ${NODE_IMAGE} AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
@@ -20,7 +26,7 @@ COPY . .
 RUN npx vite build
 
 # ------------------------------------------------------------------ runtime
-FROM nginx:1.27-alpine
+FROM ${NGINX_IMAGE}
 # The official image runs envsubst over /etc/nginx/templates/*.template at startup, and
 # only substitutes variables that are defined — so nginx's own $host, $uri stay intact.
 ENV API_UPSTREAM=https://app.ssh.com.ly

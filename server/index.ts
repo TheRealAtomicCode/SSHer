@@ -1,5 +1,5 @@
-import { timingSafeEqual } from 'node:crypto';
-import { createReadStream, promises as fs } from 'node:fs';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import posix from 'node:path/posix';
 import cors from 'cors';
@@ -11,6 +11,7 @@ import { registerNginx } from './nginx.js';
 import { asRoot, execMaybeRootOrThrow, registerOps, run, str } from './ops.js';
 import { registerPermissions } from './permissions.js';
 import { registerMonitor } from './monitor.js';
+import { registerSpeedTest } from './speedtest.js';
 import { registerSecurity } from './security.js';
 import { registerTwoFactor } from './twofa.js';
 import { registerPgBackRest } from './pgbackrest.js';
@@ -20,7 +21,7 @@ import { registerPgTunnel } from './pgtunnel.js';
 import { registerPgHba } from './pghba.js';
 import { registerProcesses } from './processes.js';
 import { registerTerminal } from './terminal.js';
-import { advanceTransfer, finishTransfer, getTransfer, startTransfer } from './transfers.js';
+import { cancelTransfer, copyFinished, finishTransfer, getTransfer, listTransfers, sftpUpload, startTransfer } from './transfers.js';
 import { registerUsers } from './users.js';
 import {
   checkSudoPassword,
@@ -241,9 +242,20 @@ app.get('/api/command-log', requireSession, (req: SessionRequest, res: Response)
 
 /** No session required: a transfer id is itself an unguessable token, and
  *  polling it shouldn't fail just because the page happened to reconnect
- *  mid-upload. Unknown/expired ids just report as done-with-nothing-to-show. */
+ *  mid-upload. An unknown id is `pending`, not done: the browser reports 100% as
+ *  soon as a proxy in between (Cloudflare, nginx) has buffered the body, which can
+ *  be well before the request reaches this process and the transfer starts. */
 app.get('/api/transfer-progress/:id', (req: Request, res: Response) => {
-  res.json(getTransfer(req.params.id) ?? { total: 0, transferred: 0, done: true, error: '' });
+  res.json(getTransfer(req.params.id) ?? { total: 0, transferred: 0, done: false, error: '', pending: true });
+});
+
+/** This login's uploads still running (or just ended) — what a reloaded page shows. */
+app.get('/api/transfers', requireSession, (req: SessionRequest, res: Response) => {
+  res.json({ transfers: listTransfers(req.session!.id) });
+});
+
+app.post('/api/transfers/:id/cancel', requireSession, (req: SessionRequest, res: Response) => {
+  res.json({ ok: cancelTransfer(String(req.params.id), req.session!.id) });
 });
 
 app.get(
@@ -556,10 +568,12 @@ app.post(
     // The browser's own upload progress only covers the browser→this-server
     // leg; relaying on to the actual remote server over SFTP is the part that
     // was previously invisible, which is what this tracks (see transfers.ts).
-    const transferId = str(req.body?.transferId);
+    const transferId = str(req.body?.transferId) || randomUUID();
     const total = files.reduce((sum, f) => sum + f.size, 0);
-    if (transferId) startTransfer(transferId, total);
+    const label = files.length === 1 ? `${files[0].originalname} → ${destDir}` : `${files.length} files → ${destDir}`;
+    const signal = startTransfer(transferId, total, { sessionId: session.id, label });
     let sent = 0;
+    let current = '';
 
     try {
       await execOrThrow(session, `mkdir -p -- ${shellQuote(destDir)}`);
@@ -578,20 +592,17 @@ app.post(
       for (const [index, file] of files.entries()) {
         const rel = relPaths[index] || file.originalname;
         const target = posix.join(destDir, rel);
-        await new Promise<void>((resolve, reject) => {
-          const read = createReadStream(file.path);
-          const write = session.sftp.createWriteStream(target);
-          if (transferId) read.on('data', (chunk: string | Buffer) => advanceTransfer(transferId, (sent += chunk.length)));
-          read.on('error', reject);
-          write.on('error', reject);
-          write.on('close', resolve);
-          read.pipe(write);
-        });
+        current = target;
+        sent += await sftpUpload(session, file.path, target, { id: transferId, signal, offset: sent });
+        current = '';
         uploaded.push(target);
       }
-      if (transferId) finishTransfer(transferId);
+      copyFinished(transferId);
+      finishTransfer(transferId);
     } catch (err) {
-      if (transferId) finishTransfer(transferId, (err as Error).message);
+      finishTransfer(transferId, (err as Error).message);
+      // Files that finished before the cancel are kept; the half-written one is not.
+      if (signal.aborted && current) await new Promise<void>((resolve) => session.sftp.unlink(current, () => resolve()));
       throw err;
     } finally {
       await Promise.all(files.map((file) => fs.unlink(file.path).catch(() => {})));
@@ -614,6 +625,7 @@ registerPermissions(app, requireSession as express.RequestHandler, asyncRoute);
 registerProcesses(app, requireSession as express.RequestHandler, asyncRoute);
 registerPgBackRest(app, requireSession as express.RequestHandler, asyncRoute);
 registerMonitor(app, requireSession as express.RequestHandler, asyncRoute);
+registerSpeedTest(app, requireSession as express.RequestHandler, asyncRoute);
 registerSecurity(app, requireSession as express.RequestHandler, asyncRoute);
 registerTwoFactor(app, requireSession as express.RequestHandler, asyncRoute);
 

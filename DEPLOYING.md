@@ -36,6 +36,23 @@ cd C:\Users\MyPC\Desktop\Projects\SSHer
 npm run docker:images
 ```
 
+The images are built for `linux/amd64` (the VPS's CPU) by default, even on an Apple
+Silicon Mac. An image built for the wrong CPU fails on the server with
+`exec format error`, and SSHer refuses to load one.
+
+Build options (add them after `--`):
+
+| Command | Builds |
+| --- | --- |
+| `npm run docker:images` | amd64, Alpine base (small, the default) |
+| `npm run docker:images:debian` | amd64, Debian 12 (bookworm) base |
+| `npm run docker:images -- --arch arm64` | For an ARM server (`uname -m` says `aarch64`) |
+| `npm run docker:images -- --only api` | Just one image (`api` or `web`) |
+
+Options can be combined, e.g. `npm run docker:images -- --base debian --arch arm64 --only web`.
+Either base runs on any Linux server, including Debian and Ubuntu. Only `--arch` has to
+match the server.
+
 This builds both images and writes two files in the SSHer folder:
 
 - `ssher-api.tar`: the back end

@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
 import * as api from '../api';
+import { ApiError } from '../api';
 import { fail, notify } from '../toast';
-import type { LocalApp, NginxSite, NginxSiteSpec, RemoteFile } from '../types';
+import type { LocalApp, NginxSite, NginxSiteSpec, RemoteFile, StepResult } from '../types';
 import NginxSiteDialog from './NginxSiteDialog.vue';
 import NginxTrafficPanel from './NginxTrafficPanel.vue';
+import StepLog from './StepLog.vue';
 import TextEditor from './TextEditor.vue';
 
 const emit = defineEmits<{ openPath: [{ path: string; isDirectory: boolean; reveal?: boolean }] }>();
@@ -13,6 +15,8 @@ const emit = defineEmits<{ openPath: [{ path: string; isDirectory: boolean; reve
 const traffic = ref<NginxSite | null>(null);
 
 const loading = ref(true);
+/** Assumed until the first refresh says otherwise, so the page doesn't flash the banner. */
+const installed = ref(true);
 const sites = ref<NginxSite[]>([]);
 const apps = ref<LocalApp[]>([]);
 const busy = ref<Set<string>>(new Set());
@@ -28,12 +32,30 @@ async function refresh() {
   loading.value = true;
   try {
     const [s, a] = await Promise.all([api.nginxSites(), api.localApps().catch(() => ({ apps: [] }))]);
+    installed.value = s.installed;
     sites.value = s.sites;
     apps.value = a.apps;
   } catch (err) {
     fail(err);
   } finally {
     loading.value = false;
+  }
+}
+
+type Log = { title: string; steps: StepResult[]; running: boolean; error: string };
+const log = ref<Log | null>(null);
+
+async function installNginx() {
+  if (!confirm('Install nginx on this server?\n\nRuns apt-get install nginx and starts it.')) return;
+  const title = 'Installing nginx';
+  log.value = { title, steps: [], running: true, error: '' };
+  try {
+    const res = await api.nginxInstall();
+    log.value = { title, steps: res.log, running: false, error: '' };
+    await refresh();
+  } catch (err) {
+    const steps = err instanceof ApiError ? ((err.payload.log as StepResult[]) ?? []) : [];
+    log.value = { title, steps, running: false, error: (err as Error).message };
   }
 }
 
@@ -112,8 +134,23 @@ function addSiteFor(app: LocalApp) {
   };
 }
 
+/** Re-opens the add-site form on a site SSHer wrote, to change it (e.g. turn on HTTPS). */
+function siteSettings(site: NginxSite) {
+  dialog.value = {
+    prefill: {
+      name: site.name,
+      domain: site.domains.join(' '),
+      target: site.target,
+      maxBody: site.maxBody,
+      overwrite: true,
+      tlsCert: site.tlsCert,
+      originPull: site.originPull,
+    },
+  };
+}
+
 function onCreated() {
-  notify('Site created');
+  notify('Site saved');
   dialog.value = null;
   refresh();
 }
@@ -193,6 +230,20 @@ const btn = 'rounded-md p-1.5 text-slate-400 transition hover:bg-slate-800 hover
     </div>
 
     <div class="min-h-0 flex-1 overflow-auto p-5">
+      <!-- Not installed -->
+      <div v-if="!installed" class="mb-5 rounded-xl border border-amber-700/50 bg-amber-500/5 px-4 py-3 text-sm text-amber-200">
+        <p class="font-medium">nginx isn't installed on this server.</p>
+        <p class="mt-1 text-xs text-amber-200/70">
+          Install it here, or just add a site — nginx is installed automatically first if it's missing.
+        </p>
+        <button
+          class="mt-3 flex items-center gap-2 rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-500"
+          @click="installNginx"
+        >
+          <v-icon name="fa-download" scale="0.75" /> Install nginx
+        </button>
+      </div>
+
       <!-- Detected apps with no site yet -->
       <div v-if="apps.length" class="mb-5 space-y-2">
         <p class="text-xs font-medium text-slate-400">Running, but not behind nginx yet</p>
@@ -253,6 +304,13 @@ const btn = 'rounded-md p-1.5 text-slate-400 transition hover:bg-slate-800 hover
           <div class="min-w-0 flex-1">
             <p class="flex flex-wrap items-center gap-2 text-sm font-medium text-white">
               {{ site.name }}
+              <span
+                v-if="site.https"
+                class="flex items-center gap-1 rounded bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-normal text-emerald-300"
+                :title="site.originPull ? 'HTTPS, Cloudflare-only connections' : 'HTTPS'"
+              >
+                <v-icon name="fa-lock" scale="0.55" /> https<template v-if="site.originPull"> · Cloudflare only</template>
+              </span>
               <span v-if="!site.managed" class="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] font-normal text-slate-400" title="Written by hand, not by SSHer — only viewable/enable-disable here">
                 hand-written
               </span>
@@ -272,6 +330,9 @@ const btn = 'rounded-md p-1.5 text-slate-400 transition hover:bg-slate-800 hover
             </button>
             <button :class="btn" title="Open in folder" @click="emit('openPath', { path: site.path, isDirectory: false, reveal: true })">
               <v-icon name="fa-folder-open" scale="0.8" />
+            </button>
+            <button v-if="site.managed" :class="btn" title="Settings (domain, target, HTTPS)" @click="siteSettings(site)">
+              <v-icon name="fa-cog" scale="0.8" />
             </button>
             <button :class="btn" title="Edit" @click="editSite(site)">
               <v-icon name="fa-pen" scale="0.8" />
@@ -322,6 +383,8 @@ const btn = 'rounded-md p-1.5 text-slate-400 transition hover:bg-slate-800 hover
       @close="dialog = null"
       @created="onCreated"
     />
+
+    <StepLog v-if="log" :title="log.title" :steps="log.steps" :running="log.running" :error="log.error" @close="log = null" />
 
     <TextEditor
       v-if="editing"

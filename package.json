@@ -16,9 +16,8 @@
     "serve": "node dist/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit && npm --prefix client run typecheck",
     "postinstall": "npm --prefix client install",
-    "docker:build": "docker build -f server/Dockerfile -t ssher/api:latest . && docker build -t ssher/web:latest client",
-    "docker:save": "docker save -o ssher-api.tar ssher/api:latest && docker save -o ssher-web.tar ssher/web:latest",
-    "docker:images": "npm run docker:build && npm run docker:save"
+    "docker:images": "node scripts/docker-images.mjs",
+    "docker:images:debian": "node scripts/docker-images.mjs --base debian"
   },
   "dependencies": {
     "cors": "^2.8.5",

@@ -12,7 +12,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Express, Response } from 'express';
 import { badRequestRoute, need, run, runSteps, str, type AsyncRoute, type SessionRequest, type Step } from './ops.js';
-import { exec, execWithInput, shellQuote, sudoPrefix, type SshSession } from './ssh.js';
+import { exec, execChannel, execWithInput, shellQuote, sudoPrefix, sudoStdin, type SshSession } from './ssh.js';
 
 const PG_IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -160,8 +160,91 @@ async function accessGrantSql(session: SshSession, role: string, db: string, wri
 
 // ------------------------------------------------------------------- routes
 
+/** Printed to stderr by the `pg_dumpall | gzip` pipeline when pg_dumpall fails — the
+ *  pipeline's own exit code is gzip's, so this is how that failure gets noticed. */
+const DUMP_FAILED = '__SSHER_DUMP_FAILED__';
+
+/** Streams a pg_dump/pg_dumpall straight to the browser: nothing is written on the
+ *  server, so there's no disk space needed there and nothing to clean up. Headers go
+ *  out only with the first byte of the dump, so a failure before that (no sudo, a
+ *  bad name) is still a normal JSON error; a failure mid-way aborts the response,
+ *  which the browser shows as a failed download rather than a quietly cut-off file. */
+async function streamDump(session: SshSession, inner: string, filename: string, res: Response): Promise<void> {
+  const asPostgres = session.username === 'postgres' ? '' : `${sudoPrefix(session, '-H -u postgres')} `;
+  const command = `${asPostgres}sh -c ${shellQuote(inner)}`;
+  const channel = await execChannel(session, command);
+  channel.end(sudoStdin(session, command));
+
+  let started = false;
+  let stderr = '';
+  channel.stderr.on('data', (chunk: Buffer) => {
+    if (stderr.length < 8000) stderr += chunk.toString('utf8');
+  });
+  channel.on('data', (chunk: Buffer) => {
+    if (!started) {
+      started = true;
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+    }
+    // Back-pressure: a slow browser pauses the SSH channel instead of piling up here.
+    if (!res.write(chunk)) {
+      channel.pause();
+      res.once('drain', () => channel.resume());
+    }
+  });
+  // The browser cancelled the download: closing the channel stops pg_dump (EPIPE).
+  res.on('close', () => {
+    if (!res.writableEnded) channel.close();
+  });
+
+  await new Promise<void>((resolve) => {
+    channel.on('close', (code: number | null) => {
+      const failed = (code ?? 0) !== 0 || stderr.includes(DUMP_FAILED);
+      const message = stderr.replace(DUMP_FAILED, '').trim() || `pg_dump exited with code ${code}`;
+      if (!started) res.status(failed ? 500 : 200).json(failed ? { error: message } : { error: 'The dump was empty' });
+      else if (failed) res.destroy(new Error(message));
+      else res.end();
+      resolve();
+    });
+  });
+}
+
 export function registerPostgres(app: Express, requireSession: import('express').RequestHandler, asyncRoute: AsyncRoute): void {
   const route = (handler: (req: SessionRequest, res: Response) => Promise<void>) => badRequestRoute(asyncRoute, handler);
+
+  /** Download one database (`?db=`) or the whole cluster (`?all=1`, roles included).
+   *  `format=custom` is pg_dump's own compressed format, restored with pg_restore;
+   *  `format=sql` is gzipped plain SQL, restorable with psql. A GET with `sid`/`key`
+   *  in the query (like /api/download), so a plain link can start it. */
+  app.get(
+    '/api/postgres/dump',
+    requireSession,
+    route(async (req, res) => {
+      const session = req.session!;
+      const stamp = new Date().toISOString().slice(0, 16).replace(/[-:]/g, '').replace('T', '-');
+      const host = session.host.replace(/[^A-Za-z0-9.-]/g, '_');
+
+      if (req.query.all === '1') {
+        await streamDump(session, `{ pg_dumpall || echo ${DUMP_FAILED} >&2; } | gzip -6`, `all-databases-${host}-${stamp}.sql.gz`, res);
+        return;
+      }
+
+      const db = str(req.query.db);
+      need(db, 'Pick a database');
+      const exists = await runPgJson<boolean>(session, `SELECT to_json(EXISTS (SELECT 1 FROM pg_database WHERE datname = ${pgLiteral(db)}));`);
+      need(exists === true, `There is no database named "${db}" on this server`);
+      const sql = str(req.query.format) === 'sql';
+      const safe = db.replace(/[^A-Za-z0-9_.-]/g, '_');
+      await streamDump(
+        session,
+        // -Z on plain output gzips the whole file (pg_dump's own zlib), so the exit code is pg_dump's.
+        sql ? `pg_dump -Fp -Z 6 -d ${shellQuote(db)}` : `pg_dump -Fc -d ${shellQuote(db)}`,
+        `${safe}-${host}-${stamp}.${sql ? 'sql.gz' : 'dump'}`,
+        res,
+      );
+    }),
+  );
 
   app.get(
     '/api/postgres/context',

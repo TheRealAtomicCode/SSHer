@@ -2,7 +2,8 @@
 import { computed, onMounted, ref } from 'vue';
 import * as api from '../api';
 import { fail, notify } from '../toast';
-import { newTransferId, watchTransfer } from '../transferProgress';
+import { isCancelled, trackUpload } from '../backgroundTasks';
+import { newTransferId } from '../transferProgress';
 import type { DotnetApp, DotnetContext, DotnetInspectResult } from '../types';
 import DotnetDeployWizard from './DotnetDeployWizard.vue';
 
@@ -32,8 +33,6 @@ async function installDotnet() {
 
 const dropping = ref(false);
 const inspecting = ref(false);
-const inspectProgress = ref<number | null>(null);
-const inspectStage = ref('Uploading…');
 let dragDepth = 0;
 
 /** Set when a drop/pick is meant to replace an existing app rather than create a new one. */
@@ -87,37 +86,19 @@ async function inspectFile(file: File) {
   const redeployName = redeployTarget.value;
   redeployTarget.value = '';
   inspecting.value = true;
-  inspectProgress.value = 0;
-  inspectStage.value = 'Uploading…';
   const transferId = newTransferId();
-  let watching = false;
-  let stopWatch = () => {};
+  // Progress and cancelling live in the background-tasks tray.
+  const task = trackUpload(transferId, file.name, 'unzip');
   try {
-    const res = await api.dotnetInspect(
-      file,
-      (p) => {
-        inspectProgress.value = p;
-        // Browser progress only covers getting the zip to this server — the
-        // relay on to the actual remote target afterward was previously
-        // invisible.
-        if (p >= 100 && !watching) {
-          watching = true;
-          inspectStage.value = 'Copying to the server…';
-          inspectProgress.value = 0;
-          stopWatch = watchTransfer(transferId, (state) => {
-            inspectProgress.value = state.total ? Math.round((state.transferred / state.total) * 100) : 0;
-          });
-        }
-      },
-      transferId,
-    );
+    const res = await api.dotnetInspect(file, task.progress, transferId, task.signal);
+    task.settle();
     wizard.value = redeployName ? { ...res, suggestedName: redeployName } : res;
   } catch (err) {
-    fail(err);
+    task.settle(err);
+    if (isCancelled(err)) notify(`Cancelled ${file.name}`);
+    else fail(err);
   } finally {
-    stopWatch();
     inspecting.value = false;
-    inspectProgress.value = null;
   }
 }
 
@@ -288,19 +269,6 @@ const STATE_TONE: Record<string, string> = {
       <div class="rounded-2xl border-2 border-dashed border-sky-400 bg-slate-900/90 px-10 py-8 text-center">
         <v-icon name="si-dotnet" scale="3" class="text-sky-400" />
         <p class="mt-3 text-base font-semibold text-white">Drop the publish .zip to deploy it</p>
-      </div>
-    </div>
-
-    <div
-      v-if="inspectProgress !== null"
-      class="fixed bottom-4 left-1/2 z-40 w-96 -translate-x-1/2 rounded-xl border border-slate-700 bg-slate-900 p-3 shadow-2xl"
-    >
-      <div class="mb-1.5 flex justify-between gap-2 text-xs text-slate-400">
-        <span>{{ inspectStage }}</span>
-        <span class="tabular-nums">{{ inspectProgress }}%</span>
-      </div>
-      <div class="h-1.5 overflow-hidden rounded-full bg-slate-800">
-        <div class="h-full rounded-full bg-sky-500 transition-all duration-200" :style="{ width: `${inspectProgress}%` }" />
       </div>
     </div>
 

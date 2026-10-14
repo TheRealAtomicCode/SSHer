@@ -54,6 +54,49 @@ const memPct = computed(() => (sample.value?.memory.total ? (memUsed.value / sam
 const rate = (b: number) => `${formatSize(Math.round(b))}/s`;
 const barTone = (pct: number) => (pct > 90 ? 'bg-red-500' : pct > 75 ? 'bg-amber-500' : 'bg-sky-500');
 
+// -------------------------------------------------------------- speed test
+
+interface SpeedResult {
+  latencyMs?: number;
+  location?: string;
+  down?: number;
+  up?: number;
+  /** Megabytes moved in total — the test isn't free on a metered link. */
+  usedMb: number;
+  time?: number;
+}
+/** Last result per server, kept across visits to the home page. */
+const speedCache: Map<string, SpeedResult> = ((globalThis as Record<string, unknown>).__ssherSpeedCache ??= new Map()) as Map<string, SpeedResult>;
+const serverKey = () => `${props.session.username}@${props.session.host}:${props.session.port}`;
+const speed = ref<SpeedResult | null>(speedCache.get(serverKey()) ?? null);
+const speedPhase = ref<'' | 'latency' | 'download' | 'upload'>('');
+const speedError = ref('');
+
+async function runSpeedTest() {
+  speedError.value = '';
+  const result: SpeedResult = { usedMb: 0 };
+  speed.value = result;
+  try {
+    speedPhase.value = 'latency';
+    Object.assign(result, await api.speedTest('latency'));
+    speedPhase.value = 'download';
+    const down = await api.speedTest('download');
+    result.down = down.mbps;
+    result.usedMb += down.bytes / 1e6;
+    speedPhase.value = 'upload';
+    const up = await api.speedTest('upload');
+    result.up = up.mbps;
+    result.usedMb += up.bytes / 1e6;
+    result.time = Date.now();
+    speedCache.set(serverKey(), { ...result });
+  } catch (err) {
+    speedError.value = (err as Error).message;
+  } finally {
+    speedPhase.value = '';
+  }
+}
+const mbps = (v?: number) => (v === undefined ? '' : v >= 100 ? v.toFixed(0) : v.toFixed(1));
+
 // ---------------------------------------------------------------- security
 
 /** One scan per server per 5 minutes, kept across visits to the home page. */
@@ -244,6 +287,9 @@ const TILES: { view: View; title: string; text: string; icon: string; tone: stri
               <p class="text-[11px] text-slate-500">Network</p>
               <p class="text-sm font-semibold text-white tabular-nums">↓ {{ live ? rate(live.rx) : '…' }}</p>
               <p class="text-sm text-slate-300 tabular-nums">↑ {{ live ? rate(live.tx) : '…' }}</p>
+              <p class="mt-1 text-[10px] text-slate-600" title="SSHer itself fetches these numbers over SSH every 3 seconds, and any public server also gets a steady trickle of scans and login attempts — a few KB/s at idle is normal.">
+                incl. SSHer's own updates
+              </p>
             </div>
           </div>
         </button>
@@ -276,6 +322,46 @@ const TILES: { view: View; title: string; text: string; icon: string; tone: stri
             <button class="mt-3 text-[11px] text-sky-400 hover:text-sky-300" @click="emit('navigate', 'security')">Open Security →</button>
           </template>
         </div>
+      </div>
+
+      <!-- Speed test of the server's own internet connection -->
+      <div class="mt-4 rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
+        <div class="flex flex-wrap items-center gap-2">
+          <p class="flex items-center gap-2 text-sm font-semibold text-white">
+            <v-icon name="fa-bolt" scale="0.8" class="text-amber-300" /> Server speed test
+          </p>
+          <span class="text-[11px] text-slate-500">
+            The server's own internet connection, measured against Cloudflare<template v-if="speed?.location"> ({{ speed.location }})</template>
+          </span>
+          <button
+            class="ml-auto flex items-center gap-1.5 rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-500 disabled:opacity-50"
+            :disabled="Boolean(speedPhase)"
+            @click="runSpeedTest"
+          >
+            <v-icon :name="speedPhase ? 'fa-spinner' : 'fa-bolt'" scale="0.7" :class="speedPhase && 'animate-spin'" />
+            {{ speedPhase ? 'Testing…' : speed ? 'Run again' : 'Run speed test' }}
+          </button>
+        </div>
+
+        <div class="mt-3 grid grid-cols-3 gap-3">
+          <div v-for="m in [
+            { key: 'download', label: 'Download', icon: '↓', value: mbps(speed?.down), unit: 'Mbps' },
+            { key: 'upload', label: 'Upload', icon: '↑', value: mbps(speed?.up), unit: 'Mbps' },
+            { key: 'latency', label: 'Latency', icon: '', value: speed?.latencyMs?.toFixed(0) ?? '', unit: 'ms' },
+          ]" :key="m.key" class="rounded-xl bg-slate-950/50 px-3 py-2.5">
+            <p class="text-[11px] text-slate-500">{{ m.icon }} {{ m.label }}</p>
+            <p class="text-xl font-semibold text-white tabular-nums">
+              <v-icon v-if="speedPhase === m.key" name="fa-spinner" scale="0.8" class="animate-spin text-amber-300" />
+              <template v-else-if="m.value">{{ m.value }} <span class="text-xs font-normal text-slate-500">{{ m.unit }}</span></template>
+              <span v-else class="text-slate-600">—</span>
+            </p>
+          </div>
+        </div>
+        <p v-if="speedError" class="mt-2 text-[11px] text-red-400">{{ speedError }}</p>
+        <p v-else class="mt-2 text-[10px] text-slate-600">
+          <template v-if="speed?.time">Tested {{ new Date(speed.time).toLocaleTimeString() }} · used {{ speed.usedMb.toFixed(0) }} MB of data. </template>
+          Takes about 20 seconds and moves up to a few hundred MB on a fast link.
+        </p>
       </div>
 
       <div class="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-4">

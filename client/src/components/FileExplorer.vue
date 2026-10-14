@@ -6,6 +6,7 @@ import { itemsFromDrop } from '../dnd';
 import { appFor, archiveFormat, cdCommand, copyToClipboard, normalizePathInput, typeKey, typeLabel } from '../files';
 import * as prefs from '../prefs';
 import { fail, notify } from '../toast';
+import { isCancelled, trackUpload } from '../backgroundTasks';
 import { newTransferId, watchTransfer } from '../transferProgress';
 import type {
   ArchiveSupport,
@@ -558,13 +559,15 @@ async function doUpload(items: UploadItem[]) {
   uploadStage.value = 'Uploading…';
   const dest = uploadDest.value;
   const transferId = newTransferId();
+  const task = trackUpload(transferId, items.length === 1 ? `${items[0].file.name} → ${dest}` : `${items.length} files → ${dest}`);
   let watching = false;
   let stopWatch = () => {};
-  await run(async () => {
+  try {
     await api.upload(
       items,
       dest,
       (percent) => {
+        task.progress(percent);
         progress.value = percent;
         // The browser's own progress event only covers getting the file to
         // this server — once that hits 100%, switch to polling the part that
@@ -574,14 +577,22 @@ async function doUpload(items: UploadItem[]) {
           uploadStage.value = 'Copying to the server…';
           progress.value = 0;
           stopWatch = watchTransfer(transferId, (state) => {
-            progress.value = state.total ? Math.round((state.transferred / state.total) * 100) : 100;
+            uploadStage.value = state.pending ? 'Sent — waiting for it to reach SSHer…' : 'Copying to the server…';
+            progress.value = state.pending ? 0 : state.total ? Math.round((state.transferred / state.total) * 100) : 100;
           });
         }
       },
       transferId,
+      task.signal,
     );
-    if (cwd.value === dest || dest.startsWith(cwd.value)) await load(cwd.value);
-  }, `Uploaded ${items.length} file${items.length === 1 ? '' : 's'} to ${dest}`);
+    task.settle();
+    notify(`Uploaded ${items.length} file${items.length === 1 ? '' : 's'} to ${dest}`);
+  } catch (err) {
+    task.settle(err);
+    if (isCancelled(err)) notify('Upload cancelled');
+    else fail(err);
+  }
+  if (cwd.value === dest || dest.startsWith(cwd.value)) await load(cwd.value).catch(() => {});
   stopWatch();
   uploading.value = false;
   uploadOpen.value = false;

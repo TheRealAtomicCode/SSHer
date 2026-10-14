@@ -25,6 +25,7 @@ import type {
   ImageInfo,
   Listing,
   LocalApp,
+  NginxCert,
   NginxSite,
   NginxSiteSpec,
   PgBackRestBackupsResponse,
@@ -225,6 +226,16 @@ export function readText(path: string): Promise<TextContent> {
   return request<TextContent>(`/text?path=${encodeURIComponent(path)}`);
 }
 
+/** A database backup streamed from pg_dump — a plain link, like fileUrl(). `db`
+ *  omitted means every database on the server (pg_dumpall, roles included). */
+export function postgresDumpUrl(opts: { db?: string; format: 'custom' | 'sql' }): string {
+  const params = new URLSearchParams({ sid: sessionId ?? '', format: opts.format });
+  if (opts.db) params.set('db', opts.db);
+  else params.set('all', '1');
+  if (accessKey) params.set('key', accessKey);
+  return `/api/postgres/dump?${params.toString()}`;
+}
+
 /** Direct URL for <img> and download links, which cannot send custom headers. */
 export function fileUrl(path: string, inline = false): string {
   const params = new URLSearchParams({ path, sid: sessionId ?? '' });
@@ -243,19 +254,42 @@ export async function upload(
   dest: string,
   onProgress?: (percent: number) => void,
   transferId?: string,
+  signal?: AbortSignal,
 ): Promise<void> {
   const form = new FormData();
   form.append('dest', dest);
   form.append('relPaths', JSON.stringify(items.map((item) => item.relPath)));
   if (transferId) form.append('transferId', transferId);
   for (const item of items) form.append('files', item.file);
-  await postForm('/upload', form, onProgress);
+  await postForm('/upload', form, onProgress, signal);
+}
+
+export interface TransferJob {
+  id: string;
+  label: string;
+  stage: 'copying' | 'processing' | 'done' | 'error' | 'cancelled';
+  processing: string;
+  total: number;
+  transferred: number;
+  error: string;
+  startedAt: number;
+}
+
+/** This login's uploads still running server-side (or just ended) — survives a reload. */
+export function listTransfers(): Promise<{ transfers: TransferJob[] }> {
+  return request('/transfers');
+}
+
+export function cancelTransfer(id: string): Promise<{ ok: boolean }> {
+  return request(`/transfers/${encodeURIComponent(id)}/cancel`, { method: 'POST' });
 }
 
 /** The part of an upload that happens after the browser's own progress event
  *  already reports 100% — relaying the file on to the actual remote target
  *  (see transferProgress.ts's watchTransfer, which polls this). */
-export function transferProgress(id: string): Promise<{ total: number; transferred: number; done: boolean; error: string }> {
+export function transferProgress(
+  id: string,
+): Promise<{ total: number; transferred: number; done: boolean; error: string; pending?: boolean }> {
   return request(`/transfer-progress/${encodeURIComponent(id)}`);
 }
 
@@ -263,10 +297,14 @@ function postForm<T = unknown>(
   path: string,
   form: FormData,
   onProgress?: (percent: number) => void,
+  signal?: AbortSignal,
 ): Promise<T> {
   // XHR rather than fetch: it is the only way to observe upload progress.
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new Error('Cancelled'));
     const xhr = new XMLHttpRequest();
+    signal?.addEventListener('abort', () => xhr.abort(), { once: true });
+    xhr.addEventListener('abort', () => reject(new Error('Cancelled')));
     xhr.open('POST', `/api${path}`);
     if (sessionId) xhr.setRequestHeader('x-session-id', sessionId);
     if (accessKey) xhr.setRequestHeader('x-access-key', accessKey);
@@ -364,11 +402,12 @@ export function dockerLoad(
   file: File,
   onProgress?: (percent: number) => void,
   transferId?: string,
+  signal?: AbortSignal,
 ): Promise<{ images: string[]; output: string }> {
   const form = new FormData();
-  form.append('image', file);
   if (transferId) form.append('transferId', transferId);
-  return postForm('/docker/load', form, onProgress);
+  form.append('image', file);
+  return postForm('/docker/load', form, onProgress, signal);
 }
 
 export function dockerDeployPlan(spec: DeploySpec): Promise<{
@@ -439,8 +478,12 @@ export function exists(paths: string[]): Promise<{ found: Record<string, 'file' 
 
 // -------------------------------------------------------------------- nginx
 
-export function nginxSites(): Promise<{ sites: NginxSite[] }> {
+export function nginxSites(): Promise<{ installed: boolean; sites: NginxSite[] }> {
   return request('/nginx/sites');
+}
+
+export function nginxInstall(): Promise<{ log: StepResult[] }> {
+  return request('/nginx/install', { method: 'POST' });
 }
 
 export function localApps(): Promise<{ apps: LocalApp[] }> {
@@ -454,6 +497,14 @@ export function nginxUploadSite(
   form.append('filename', file.name);
   form.append('site', file);
   return postForm('/nginx/upload-site', form);
+}
+
+export function nginxCerts(): Promise<{ certs: NginxCert[] }> {
+  return request('/nginx/certs');
+}
+
+export function nginxAddCert(cert: { name: string; cert: string; key: string }): Promise<{ certs: NginxCert[] }> {
+  return request('/nginx/certs', { method: 'POST', body: json(cert) });
 }
 
 export function nginxAddSite(spec: NginxSiteSpec): Promise<{ log: StepResult[]; site: NginxSite }> {
@@ -481,11 +532,12 @@ export function dotnetInspect(
   file: File,
   onProgress?: (percent: number) => void,
   transferId?: string,
+  signal?: AbortSignal,
 ): Promise<DotnetInspectResult> {
   const form = new FormData();
-  form.append('app', file);
   if (transferId) form.append('transferId', transferId);
-  return postForm('/dotnet/inspect', form, onProgress);
+  form.append('app', file);
+  return postForm('/dotnet/inspect', form, onProgress, signal);
 }
 
 export function dotnetInstallRuntime(name: string, version: string): Promise<{ output: string }> {
@@ -762,6 +814,13 @@ export function pgbackrestStats(): Promise<PgBackRestStats> {
 
 export function systemDisk(): Promise<{ disks: DiskUsage[] }> {
   return request('/system/disk');
+}
+
+/** One phase of the server's own internet speed test (curl → speed.cloudflare.com). */
+export function speedTest(phase: 'latency'): Promise<{ latencyMs: number; location: string }>;
+export function speedTest(phase: 'download' | 'upload'): Promise<{ mbps: number; bytes: number; seconds: number }>;
+export function speedTest(phase: string): Promise<unknown> {
+  return request('/system/speedtest', { method: 'POST', body: json({ phase }) });
 }
 
 export function pgbackrestRestore(targetTime: string, repo?: 1 | 2): Promise<{ log: StepResult[] }> {
