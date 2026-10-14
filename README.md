@@ -128,10 +128,42 @@ Both run plain shell commands over the SSH session (`docker`, `docker compose`, 
   env, mounts, and the compose/env files the project was started with (edit → save → apply
   with `docker compose up -d`). **Update** tags the running image `:rollback` and
   `:rollback-YYYYMMDD-HHMM`, pulls, and recreates; **Roll back** restores `:rollback`.
+- **Config** (a container's tab) lists every file the container takes its configuration
+  from: the compose files, the service's own `env_file:` entries (resolved by
+  `docker compose config`, so `${ENV_FILE:-.env.prod}` and relative paths show as the real
+  file), the `--env-file` that fills in `${…}`, and `appsettings*.json`. Each opens in the
+  editor, whose **Upload** replaces the text with a local file before you save. Saving
+  offers to apply: `docker compose up -d` for compose and env files, a restart for
+  appsettings. A required env file that is missing is flagged in red (the usual cause of a
+  "missing configuration" crash loop) and **Create** makes it, empty and mode 600. An
+  appsettings file that exists only in the image gets **Make editable**: it is copied to
+  `<project>/ssher-config/<service>/`, bind-mounted back through `ssher.override.yml`, and
+  the service is recreated, so later edits survive recreates and new builds.
 - **Deploy new** — drop a `docker save` tarball (or pick a local/registry image) and the
   wizard writes `/opt/<name>/docker-compose.yml`, starts it, and optionally adds an nginx
   site for a domain (port bound to `127.0.0.1`) or a ufw rule. The review step shows every
   file and command before anything runs.
+- **Connects to** (a container's tab) lists the databases and services it talks to. Each one has
+  **Test**, which connects from inside the container's network namespace, so `localhost`,
+  `host.docker.internal`, service names, ufw and `pg_hba.conf` behave as they do for the app. A
+  stopped or crash-looping container is tested from a temporary copy of its image. Postgres goes
+  as far as a login (it needs `psql` on the server), Redis gets `AUTH` and `PING`, and a URL gets
+  a GET. **Save** writes the new values to `ssher.override.yml` in the project folder and
+  recreates that one container. Every compose command SSHer runs adds that file when it exists.
+  The connections are read from the container's env, or declared exactly by image or compose
+  labels:
+
+  ```dockerfile
+  LABEL io.ssher.link.database="postgres host=DB_HOST port=DB_PORT database=DB_NAME user=DB_USER password=DB_PASSWORD" \
+        io.ssher.link.redis="redis host=REDIS_HOST port=REDIS_PORT password=REDIS_PASSWORD" \
+        io.ssher.link.api="http url=API_BASE" \
+        io.ssher.link.api.note="Shown under the link" \
+        io.ssher.name="my-app" io.ssher.host-gateway="true"   # deploy wizard defaults
+  ```
+
+  Kinds are `postgres`, `redis`, `http` and `tcp`. Fields name env variables: `host`, `port`,
+  `database`, `user`, `password`, `url`, or `connstr` (an Npgsql `Host=…;` or StackExchange.Redis
+  `host:port,password=…` string).
 - **Ports & Firewall** shows each listening port as local / public / allow-listed / blocked,
   flags Docker-published ports (they bypass ufw), and adds, deletes or restricts ufw rules.
   It refuses to close the SSH port you are connected on without an explicit confirmation,

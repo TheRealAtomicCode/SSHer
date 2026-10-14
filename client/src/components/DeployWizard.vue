@@ -102,10 +102,13 @@ async function pull() {
 /** Fill every field we can guess from what the image declares. */
 function applyImage(image: string) {
   spec.image = image;
+  // An image can suggest its own deploy settings (see client/src/links.ts for io.ssher.link.*).
+  const labels = info.value?.labels ?? {};
   if (!nameTouched.value) {
-    spec.name = nameFromImage(image);
+    spec.name = /^[a-z0-9][a-z0-9_-]{0,62}$/.test(labels['io.ssher.name'] ?? '') ? labels['io.ssher.name'] : nameFromImage(image);
     spec.dir = `/opt/${spec.name}`;
   }
+  if (labels['io.ssher.host-gateway'] === 'true') spec.hostGateway = true;
   const first = exposedPorts.value[0];
   spec.containerPort = first ?? spec.containerPort ?? 80;
   if (!spec.hostPort) spec.hostPort = freePort(first && first >= 1024 && first !== 8080 ? first : 3002);

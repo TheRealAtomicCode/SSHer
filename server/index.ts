@@ -6,6 +6,8 @@ import cors from 'cors';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import multer from 'multer';
 import { registerArchive } from './archive.js';
+import { registerDockerLinks } from './dockerlinks.js';
+import { registerContainerConfig } from './containerconfig.js';
 import { registerDotnet } from './dotnet.js';
 import { registerNginx } from './nginx.js';
 import { asRoot, execMaybeRootOrThrow, registerOps, run, str } from './ops.js';
@@ -613,6 +615,8 @@ app.post(
 );
 
 registerOps(app, requireSession as express.RequestHandler, asyncRoute, upload);
+registerDockerLinks(app, requireSession as express.RequestHandler, asyncRoute);
+registerContainerConfig(app, requireSession as express.RequestHandler, asyncRoute);
 registerArchive(app, requireSession as express.RequestHandler, asyncRoute);
 registerNginx(app, requireSession as express.RequestHandler, asyncRoute, upload);
 registerDotnet(app, requireSession as express.RequestHandler, asyncRoute, upload);

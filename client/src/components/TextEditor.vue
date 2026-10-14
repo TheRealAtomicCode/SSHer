@@ -98,6 +98,24 @@ async function save() {
   }
 }
 
+/** Replaces the editor's text with a local file's. Nothing is written until Save, so the
+ *  upload can be checked (and Ctrl+Z'd in the textarea) first. */
+const picker = ref<HTMLInputElement | null>(null);
+async function onPick(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const picked = input.files?.[0];
+  input.value = '';
+  if (!picked) return;
+  const text = await picked.text();
+  if (text.includes('\0')) {
+    error.value = `${picked.name} is not a text file.`;
+    return;
+  }
+  if (dirty.value && !confirm(`Replace your unsaved changes with ${picked.name}?`)) return;
+  content.value = text;
+  error.value = '';
+}
+
 function close() {
   if (dirty.value && !confirm('Discard unsaved changes?')) return;
   emit('close');
@@ -155,6 +173,16 @@ function close() {
         <v-icon v-else name="fa-check" scale="0.8" />
         {{ saving ? 'Saving…' : 'Save' }}
       </button>
+
+      <button
+        v-if="!readOnly"
+        title="Upload: replace the text with a file from this computer (saved only when you press Save)"
+        class="flex items-center gap-1.5 rounded-md border border-slate-700 px-2.5 py-1.5 text-xs text-slate-300 transition hover:border-sky-500 hover:text-white"
+        @click="picker?.click()"
+      >
+        <v-icon name="fa-upload" scale="0.75" /> Upload
+      </button>
+      <input ref="picker" type="file" class="hidden" @change="onPick" />
 
       <button
         title="Download"

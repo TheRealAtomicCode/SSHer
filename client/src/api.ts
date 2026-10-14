@@ -1,5 +1,6 @@
 import type {
   ContainerStat,
+  ContainerConfigInfo,
   LogTail,
   MonitorSample,
   NetConnection,
@@ -23,6 +24,7 @@ import type {
   DotnetInspectResult,
   FilePermissions,
   ImageInfo,
+  LinkTestResult,
   Listing,
   LocalApp,
   NginxCert,
@@ -388,6 +390,45 @@ export function dockerCompose(
     method: 'POST',
     body: json({ ...compose, ...opts, op }),
   });
+}
+
+/** Env keys SSHer overrides for this container (ssher.override.yml), and whether it can. */
+export function dockerLinkOverrides(
+  id: string,
+): Promise<{ editable: boolean; reason: string; file: string; env: Record<string, string> }> {
+  return request(`/docker/links/overrides?id=${encodeURIComponent(id)}`);
+}
+
+/** Tests a target from inside the container's network: resolve, connect, then log in/PING/GET. */
+export function dockerLinkTest(
+  id: string,
+  target: { kind: string; host?: string; port?: number | string; database?: string; user?: string; password?: string; url?: string },
+): Promise<LinkTestResult> {
+  return request('/docker/links/test', { method: 'POST', body: json({ id, ...target }) });
+}
+
+/** Sets/clears env overrides for the container's compose service and recreates it. */
+export function dockerLinkSave(
+  id: string,
+  set: Record<string, string>,
+  unset: string[] = [],
+): Promise<{ log: StepResult[]; file: string }> {
+  return request('/docker/links/save', { method: 'POST', body: json({ id, set, unset }) });
+}
+
+/** Every file this container is configured from: compose files, env files, appsettings. */
+export function dockerConfigFiles(id: string): Promise<ContainerConfigInfo> {
+  return request(`/docker/config/files?id=${encodeURIComponent(id)}`);
+}
+
+/** Creates a missing env file the container reads (empty, mode 600). */
+export function dockerConfigCreate(id: string, path: string): Promise<{ path: string }> {
+  return request('/docker/config/create', { method: 'POST', body: json({ id, path }) });
+}
+
+/** Copies an appsettings file out of the image, bind-mounts it back and recreates the service. */
+export function dockerConfigExtract(id: string, containerPath: string): Promise<{ log: StepResult[]; path: string }> {
+  return request('/docker/config/extract', { method: 'POST', body: json({ id, containerPath }) });
 }
 
 export function dockerPull(image: string): Promise<{ output: string }> {

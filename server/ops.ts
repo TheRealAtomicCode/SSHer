@@ -252,8 +252,15 @@ function toContainer(c: Inspect): Container {
   };
 }
 
-/** The `docker compose` prefix that reproduces how a project was originally brought up. */
-function composeCmd(spec: {
+/** Per-project file where the "Connects to" tab (dockerlinks.ts) keeps its environment
+ *  overrides. Lives beside the compose files and is layered on last. */
+export const OVERRIDE_FILE = 'ssher.override.yml';
+
+/** The `docker compose` prefix that reproduces how a project was originally brought up.
+ *  The override file is added whenever it exists, rather than only when a container's
+ *  labels list it: containers recreated before it was written still carry the old list,
+ *  and an "Apply" taken from one of them would otherwise quietly drop the overrides. */
+export function composeCmd(spec: {
   project: string;
   workingDir: string;
   configFiles: string[];
@@ -262,9 +269,14 @@ function composeCmd(spec: {
   need(RE.id.test(spec.project), 'invalid compose project');
   need(RE.absPath.test(spec.workingDir), 'invalid working directory');
   for (const f of [...spec.configFiles, ...spec.envFiles]) need(RE.absPath.test(f), `invalid path ${f}`);
-  const parts = [`cd ${shellQuote(spec.workingDir)} && docker compose -p ${shellQuote(spec.project)}`];
+  const override = shellQuote(posix.join(spec.workingDir, OVERRIDE_FILE));
+  // "$@" rather than $(…): a path with a space survives it.
+  const parts = [
+    `cd ${shellQuote(spec.workingDir)} && if [ -f ${override} ]; then set -- -f ${override}; else set --; fi && docker compose -p ${shellQuote(spec.project)}`,
+  ];
   for (const e of spec.envFiles) parts.push(`--env-file ${shellQuote(e)}`);
-  for (const f of spec.configFiles) parts.push(`-f ${shellQuote(f)}`);
+  for (const f of spec.configFiles) if (f !== posix.join(spec.workingDir, OVERRIDE_FILE)) parts.push(`-f ${shellQuote(f)}`);
+  parts.push('"$@"');
   return parts.join(' ');
 }
 
@@ -864,6 +876,7 @@ export function registerOps(
           WorkingDir?: string;
           Cmd?: string[];
           Entrypoint?: string[];
+          Labels?: Record<string, string> | null;
         };
         Size?: number;
         Created?: string;
@@ -876,6 +889,7 @@ export function registerOps(
         volumes: Object.keys(cfg.Volumes ?? {}),
         workingDir: cfg.WorkingDir ?? '',
         cmd: [...(cfg.Entrypoint ?? []), ...(cfg.Cmd ?? [])].join(' '),
+        labels: cfg.Labels ?? {},
         size: info.Size ?? 0,
         created: info.Created ?? '',
       });

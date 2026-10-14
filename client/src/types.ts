@@ -207,6 +207,7 @@ export interface ImageInfo {
   cmd?: string;
   size?: number;
   created?: string;
+  labels?: Record<string, string>;
 }
 
 export interface DockerContext {
@@ -239,6 +240,42 @@ export interface StepResult {
   title: string;
   ok: boolean;
   output: string;
+}
+
+export interface LinkTestStep {
+  title: string;
+  ok: boolean;
+  detail: string;
+  hint?: string;
+}
+
+export interface LinkTestResult {
+  ok: boolean;
+  /** Where the test ran from (the container, or a temporary copy of it). */
+  note: string;
+  steps: LinkTestStep[];
+}
+
+/** A file a container takes its configuration from (Docker → container → Config). */
+export interface ContainerConfigFile {
+  /** compose: compose files · project-env: --env-file (fills ${…} in them) ·
+   *  service-env: env_file: entries, loaded into the container · appsettings: appsettings*.json */
+  kind: 'compose' | 'project-env' | 'service-env' | 'appsettings';
+  /** Path on the server; for an image-only file, the path inside the container. */
+  path: string;
+  containerPath: string;
+  /** 'image': only inside the container, not editable until copied out. */
+  location: 'host' | 'image';
+  exists: boolean;
+  size: number;
+  required: boolean;
+}
+
+export interface ContainerConfigInfo {
+  compose: { project: string; service: string; workingDir: string } | null;
+  files: ContainerConfigFile[];
+  /** Why `docker compose config` failed, when it did (often: a missing env file). */
+  configError: string;
 }
 
 export type ComposeOp = 'up' | 'recreate' | 'restart' | 'pull' | 'down' | 'config' | 'update' | 'rollback' | 'destroy' | 'redeploy';

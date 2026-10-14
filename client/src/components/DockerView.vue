@@ -5,12 +5,13 @@ import { ApiError } from '../api';
 import { fail, notify } from '../toast';
 import { isCancelled, trackUpload } from '../backgroundTasks';
 import { newTransferId } from '../transferProgress';
-import type { ComposeInfo, ComposeOp, Container, DockerImage, RemoteFile, Session, StepResult } from '../types';
+import type { ComposeInfo, ComposeOp, Container, DockerImage, Session, StepResult } from '../types';
 import DeployWizard from './DeployWizard.vue';
+import ContainerConfig from './ContainerConfig.vue';
+import ContainerLinks from './ContainerLinks.vue';
 import ContainerNetwork from './ContainerNetwork.vue';
 import LogViewer from './LogViewer.vue';
 import StepLog from './StepLog.vue';
-import TextEditor from './TextEditor.vue';
 
 /** `route` is the container + tab from the URL (#/docker/<name>/<tab>); the page reports
  *  its own changes back through the `route` event so Back/Forward work. */
@@ -31,12 +32,20 @@ const images = ref<DockerImage[]>([]);
 const busy = ref<Set<string>>(new Set());
 const query = ref('');
 
+const TABS = ['overview', 'links', 'network', 'config', 'logs', 'inspect'] as const;
+const TAB_LABELS: Record<(typeof TABS)[number], string> = {
+  overview: 'Overview',
+  links: 'Connects to',
+  network: 'Network',
+  config: 'Config',
+  logs: 'Logs',
+  inspect: 'Inspect',
+};
+
 const selected = ref<Container | null>(null);
-const detailTab = ref<'overview' | 'network' | 'config' | 'logs' | 'inspect'>('overview');
+const detailTab = ref<(typeof TABS)[number]>('overview');
 const inspectJson = ref('');
 const revealSecrets = ref(false);
-const editing = ref<RemoteFile | null>(null);
-const editedCompose = ref<ComposeInfo | null>(null);
 
 const wizard = ref<{ image: string; source: 'loaded' | 'local' | '' } | null>(null);
 const opLog = ref<{ title: string; steps: StepResult[]; running: boolean; error: string } | null>(null);
@@ -68,7 +77,11 @@ async function refresh() {
     version.value = c.version ?? '';
     containers.value = c.containers;
     images.value = i.images;
-    if (selected.value) selected.value = c.containers.find((x) => x.id === selected.value!.id) ?? null;
+    // A recreated container has a new id, so fall back to its name to keep the panel open.
+    if (selected.value) {
+      const was = selected.value;
+      selected.value = c.containers.find((x) => x.id === was.id) ?? c.containers.find((x) => x.name === was.name) ?? null;
+    }
     applyRoute();
   } catch (err) {
     fail(err);
@@ -78,8 +91,6 @@ async function refresh() {
 }
 
 // ----------------------------------------------------------------- routing
-
-const TABS = ['overview', 'network', 'config', 'logs', 'inspect'] as const;
 
 /** Open (or close) the container panel the URL names. */
 function applyRoute() {
@@ -173,9 +184,12 @@ const OP_TITLES: Record<ComposeOp, string> = {
   redeploy: 'Update to the new build',
 };
 
-/** Projects made by the deploy wizard have exactly one compose file named docker-compose.yml. */
-const isWizardProject = (c: ComposeInfo) =>
-  c.configFiles.length === 1 && c.configFiles[0] === `${c.workingDir}/docker-compose.yml`;
+/** Projects made by the deploy wizard have one compose file named docker-compose.yml (plus,
+ *  once a connection was changed, SSHer's own ssher.override.yml). */
+const isWizardProject = (c: ComposeInfo) => {
+  const files = c.configFiles.filter((f) => f !== `${c.workingDir}/ssher.override.yml`);
+  return files.length === 1 && files[0] === `${c.workingDir}/docker-compose.yml`;
+};
 
 async function composeOp(compose: ComposeInfo, op: ComposeOp, c?: Container) {
   const target = c ? `${compose.project} / ${compose.service}` : compose.project;
@@ -269,29 +283,12 @@ watch(selected, (s) => {
   if (s && detailTab.value === 'overview') loadInspect();
 });
 
-function asFile(path: string): RemoteFile {
-  return { name: path.split('/').pop() ?? path, path, isDirectory: false, isSymlink: false, size: 0, mtime: 0, mode: 0 };
-}
-
-function editConfig(path: string, compose: ComposeInfo) {
-  editedCompose.value = compose;
-  editing.value = asFile(path);
-}
-
-function onConfigSaved() {
-  const compose = editedCompose.value;
-  notify(`Saved ${editing.value?.name}`);
-  if (compose && confirm(`Saved. Apply the change now?\n\nRuns docker compose up -d for ${compose.project} — only containers whose config changed are recreated.`)) {
-    editing.value = null;
-    composeOp(compose, 'up');
-  }
-}
-
-function download(file: RemoteFile) {
-  const link = document.createElement('a');
-  link.href = api.fileUrl(file.path);
-  link.download = file.name;
-  link.click();
+/** After a file was saved in the Config tab. */
+function onConfigApply(how: 'up' | 'restart') {
+  const c = selected.value;
+  if (!c) return;
+  if (how === 'up' && c.compose) composeOp(c.compose, 'up');
+  else action(c, 'restart');
 }
 
 // --------------------------------------------------------- drop to deploy
@@ -547,7 +544,7 @@ const btn = 'rounded-md p-1.5 text-slate-400 transition hover:bg-slate-800 hover
                   <button :class="btn" title="Logs" @click="openDetail(c, 'logs')">
                     <v-icon name="fa-terminal" scale="0.75" />
                   </button>
-                  <button v-if="c.compose" :class="btn" title="Config files" @click="openDetail(c, 'config')">
+                  <button :class="btn" title="Config files" @click="openDetail(c, 'config')">
                     <v-icon name="fa-cog" scale="0.75" />
                   </button>
                   <span
@@ -632,15 +629,15 @@ const btn = 'rounded-md p-1.5 text-slate-400 transition hover:bg-slate-800 hover
         </div>
         <button :class="btn" @click="selected = null"><v-icon name="fa-times" scale="0.8" /></button>
       </div>
-      <div class="flex gap-1 border-b border-slate-800 px-3 pt-2 text-xs">
+      <div class="flex gap-0.5 overflow-x-auto border-b border-slate-800 px-3 pt-2 text-xs">
         <button
-          v-for="t in (['overview', 'network', 'config', 'logs', 'inspect'] as const)"
+          v-for="t in TABS"
           :key="t"
-          class="rounded-t-md border-b-2 px-3 py-1.5 capitalize transition"
+          class="rounded-t-md border-b-2 px-2.5 py-1.5 whitespace-nowrap transition"
           :class="detailTab === t ? 'border-sky-400 text-white' : 'border-transparent text-slate-500 hover:text-slate-300'"
           @click="detailTab = t"
         >
-          {{ t }}
+          {{ TAB_LABELS[t] }}
         </button>
       </div>
 
@@ -748,57 +745,21 @@ const btn = 'rounded-md p-1.5 text-slate-400 transition hover:bg-slate-800 hover
           </div>
         </div>
 
+        <!-- What it connects to -->
+        <ContainerLinks v-else-if="detailTab === 'links'" :key="selected.id" :container="selected" @changed="refresh" />
+
         <!-- Network -->
         <ContainerNetwork v-else-if="detailTab === 'network'" :key="selected.id" :container="selected" />
 
         <!-- Config files -->
-        <div v-else-if="detailTab === 'config'" class="space-y-4">
-          <template v-if="selected.compose">
-            <p class="text-xs text-slate-400">
-              The files this project was started with. Edit one, save, and you'll be offered to apply it
-              (<code>docker compose up -d</code>).
-            </p>
-            <div>
-              <p class="mb-1.5 text-xs font-medium text-slate-500">Compose files</p>
-              <button
-                v-for="f in selected.compose.configFiles"
-                :key="f"
-                class="mb-1.5 flex w-full items-center gap-2 rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-left hover:border-sky-600"
-                @click="editConfig(f, selected.compose)"
-              >
-                <v-icon name="fa-file-code" scale="0.8" class="text-sky-300" />
-                <span class="min-w-0 flex-1 truncate font-mono text-xs text-slate-200">{{ f }}</span>
-                <v-icon name="fa-pen" scale="0.6" class="text-slate-500" />
-              </button>
-            </div>
-            <div v-if="selected.compose.envFiles.length">
-              <p class="mb-1.5 text-xs font-medium text-slate-500">Environment files</p>
-              <button
-                v-for="f in selected.compose.envFiles"
-                :key="f"
-                class="mb-1.5 flex w-full items-center gap-2 rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-left hover:border-amber-600"
-                @click="editConfig(f, selected.compose)"
-              >
-                <v-icon name="fa-lock" scale="0.75" class="text-amber-300" />
-                <span class="min-w-0 flex-1 truncate font-mono text-xs text-slate-200">{{ f }}</span>
-                <v-icon name="fa-pen" scale="0.6" class="text-slate-500" />
-              </button>
-              <p class="text-[11px] text-slate-500">
-                Changing a VITE_* value only takes effect after the image is rebuilt — it is compiled into the bundle.
-              </p>
-            </div>
-            <button
-              class="flex items-center gap-1.5 text-xs text-slate-400 hover:text-white"
-              @click="emit('openPath', { path: selected.compose.workingDir, isDirectory: true })"
-            >
-              <v-icon name="fa-folder-open" scale="0.7" /> Browse {{ selected.compose.workingDir }}
-            </button>
-          </template>
-          <p v-else class="text-xs text-slate-400">
-            This container wasn't started by docker compose, so it has no config file — its settings live in the
-            container itself (see Inspect). To manage it with a file, redeploy it through <b>Deploy new</b>.
-          </p>
-        </div>
+        <ContainerConfig
+          v-else-if="detailTab === 'config'"
+          :key="selected.id"
+          :container="selected"
+          @open-path="emit('openPath', $event)"
+          @apply="onConfigApply"
+          @changed="refresh"
+        />
 
         <!-- Logs -->
         <div v-else-if="detailTab === 'logs'" class="flex h-full flex-col">
@@ -884,12 +845,5 @@ const btn = 'rounded-md p-1.5 text-slate-400 transition hover:bg-slate-800 hover
       @close="opLog = null"
     />
 
-    <TextEditor
-      v-if="editing"
-      :file="editing"
-      @close="editing = null"
-      @saved="onConfigSaved"
-      @download="download"
-    />
   </div>
 </template>

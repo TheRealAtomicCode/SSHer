@@ -7,7 +7,7 @@
 //     mid-upload can show that the work is still going on server-side;
 //   * POST /api/transfers/:id/cancel aborts one — the SFTP copy is cut and a
 //     remote command started through runCancellable() is killed on the server.
-import { createReadStream } from 'node:fs';
+import { open } from 'node:fs/promises';
 import type { SshSession } from './ssh.js';
 
 /** Kept this long after finishing, so a reloaded page still sees how it ended. */
@@ -140,34 +140,76 @@ export function cancelTransfer(id: string, sessionId: string): boolean {
   return true;
 }
 
+/** SFTP writes kept in flight at once. ssh2's createWriteStream sends one and waits
+ *  for its ack before the next, so throughput was capped at chunk ÷ round-trip time
+ *  (≈320 KB/s at 100 ms) no matter how fast the link is. 64 × 32 KB matches what
+ *  ssh2's own fastPut uses, and fits the default SSH channel window. */
+const UPLOAD_CONCURRENCY = 64;
+const UPLOAD_CHUNK = 32 * 1024;
+
 /** Copies a local file to the remote server over SFTP, reporting progress to job
  *  `id` and stopping (with the partial remote file left for the caller's cleanup)
  *  as soon as `signal` fires. `offset` is what earlier files of the same job sent. */
-export function sftpUpload(
+export async function sftpUpload(
   session: SshSession,
   localPath: string,
   remotePath: string,
   job: { id: string; signal: AbortSignal; offset?: number },
 ): Promise<number> {
-  return new Promise<number>((resolve, reject) => {
-    if (job.signal.aborted) return reject(new CancelledError());
-    const read = createReadStream(localPath);
-    const write = session.sftp.createWriteStream(remotePath);
+  if (job.signal.aborted) throw new CancelledError();
+  const { sftp } = session;
+  const local = await open(localPath, 'r');
+  let handle: Buffer | undefined;
+  try {
+    const size = (await local.stat()).size;
+    handle = await new Promise<Buffer>((resolve, reject) =>
+      sftp.open(remotePath, 'w', (err, h) => (err ? reject(err) : resolve(h))),
+    );
+    const remote = handle;
     let sent = 0;
-    const onAbort = () => {
-      read.destroy();
-      write.destroy();
-      reject(new CancelledError());
-    };
-    job.signal.addEventListener('abort', onAbort, { once: true });
-    const settle = (fn: () => void) => {
-      job.signal.removeEventListener('abort', onAbort);
-      fn();
-    };
-    read.on('data', (chunk: string | Buffer) => advanceTransfer(job.id, (job.offset ?? 0) + (sent += chunk.length)));
-    read.on('error', (err) => settle(() => reject(err)));
-    write.on('error', (err: Error) => settle(() => reject(err)));
-    write.on('close', () => settle(() => (job.signal.aborted ? reject(new CancelledError()) : resolve(sent))));
-    read.pipe(write);
-  });
+    await new Promise<void>((resolve, reject) => {
+      let next = 0;
+      let inFlight = 0;
+      let settled = false;
+      const settle = (err?: Error) => {
+        if (settled) return;
+        settled = true;
+        job.signal.removeEventListener('abort', onAbort);
+        if (err) reject(err);
+        else resolve();
+      };
+      const onAbort = () => settle(new CancelledError());
+      job.signal.addEventListener('abort', onAbort, { once: true });
+      const pump = () => {
+        while (!settled && inFlight < UPLOAD_CONCURRENCY && next < size) {
+          const position = next;
+          const len = Math.min(UPLOAD_CHUNK, size - position);
+          next += len;
+          inFlight++;
+          const buf = Buffer.allocUnsafe(len);
+          local.read(buf, 0, len, position).then(({ bytesRead }) => {
+            if (settled) return;
+            if (bytesRead !== len) return settle(new Error(`${localPath} changed while it was being uploaded`));
+            sftp.write(remote, buf, 0, len, position, (err) => {
+              inFlight--;
+              if (err) return settle(err);
+              sent += len;
+              advanceTransfer(job.id, (job.offset ?? 0) + sent);
+              if (sent === size) settle();
+              else pump();
+            });
+          }, settle);
+        }
+      };
+      if (size === 0) settle();
+      else pump();
+    });
+    return sent;
+  } finally {
+    await local.close().catch(() => {});
+    if (handle) {
+      const h = handle;
+      await new Promise<void>((resolve) => sftp.close(h, () => resolve()));
+    }
+  }
 }
