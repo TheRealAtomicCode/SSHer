@@ -8,7 +8,8 @@
 // write is checked the same way BEFORE the reload — a file PostgreSQL can't parse is
 // put back from the copy taken just before, so a typo here can never lock anyone out.
 import type { Express, Response } from 'express';
-import { badRequestRoute, need, run, str, type AsyncRoute, type SessionRequest } from './ops.js';
+import { badRequestRoute, need, port, run, runOrThrow, str, type AsyncRoute, type SessionRequest } from './ops.js';
+import { retargetPgTunnel } from './pgtunnel.js';
 import { execAsPostgres, runPgJson, runPgSql } from './postgres.js';
 import { exec, execWithInput, shellQuote, sudoPrefix, type SshSession } from './ssh.js';
 
@@ -98,6 +99,26 @@ interface Cluster {
   online: boolean;
 }
 
+/** Docker's private range: where a container's host.docker.internal connection comes from. */
+const DOCKER_RANGE = '172.16.0.0/12';
+const UFW_COMMENT = 'ssher: postgres from docker';
+
+/** Whether ufw is on, and whether it lets containers through to `pgPort`. With ufw's
+ *  default-deny, a container's connection to the host is dropped like any other
+ *  incoming one — pg_hba and listen_addresses can be perfect and it still times out. */
+async function firewall(session: SshSession, pgPort: number): Promise<{ active: boolean; containersAllowed: boolean }> {
+  const status = await run(session, 'command -v ufw >/dev/null && ufw status 2>/dev/null || true', true);
+  const active = /Status:\s+active/i.test(status.stdout);
+  const containersAllowed = status.stdout
+    .split('\n')
+    .some((l) => new RegExp(`^${pgPort}(/tcp)?\\s+ALLOW(\\s+IN)?\\s+172\\.16\\.0\\.0/12\\b`).test(l.trim()));
+  return { active, containersAllowed };
+}
+
+async function allowContainersThroughFirewall(session: SshSession, pgPort: number): Promise<string> {
+  return runOrThrow(session, `ufw allow from ${DOCKER_RANGE} to any port ${pgPort} proto tcp comment '${UFW_COMMENT}' 2>&1`);
+}
+
 export function registerPgHba(app: Express, requireSession: import('express').RequestHandler, asyncRoute: AsyncRoute): void {
   const route = (handler: (req: SessionRequest, res: Response) => Promise<void>) => badRequestRoute(asyncRoute, handler);
 
@@ -119,9 +140,85 @@ export function registerPgHba(app: Express, requireSession: import('express').Re
         port: Number(port.trim()),
         listenAddresses: listen.trim(),
         hasDocker: docker.stdout.trim() === 'yes',
+        firewall: await firewall(session, Number(port.trim())),
         rules: list,
         ...found,
       });
+    }),
+  );
+
+  /** Lets containers through ufw to PostgreSQL — the step "Allow containers" was missing. */
+  app.post(
+    '/api/postgres/firewall-containers',
+    requireSession,
+    route(async (req, res) => {
+      const session = req.session!;
+      const pgPort = Number((await runPgSql(session, 'SHOW port;')).trim());
+      res.json({ ok: true, output: await allowContainersThroughFirewall(session, pgPort) });
+    }),
+  );
+
+  /**
+   * Moves PostgreSQL to another port. The line that actually sets it is found through
+   * pg_settings (postgresql.conf, a conf.d file, …) and rewritten there, because Debian's
+   * psql wrapper and pg_lsclusters read the port from those files — an ALTER SYSTEM value
+   * in postgresql.auto.conf would move the server but leave every `sudo -u postgres psql`,
+   * including SSHer's own, knocking on the old port. A port set there is reset instead.
+   *
+   * Afterwards: a firewall rule letting containers in follows to the new port, an open
+   * SSH tunnel is re-pointed, and if PostgreSQL won't come back up the old file is
+   * restored and it is restarted again — so a bad choice can't leave it down.
+   */
+  app.post(
+    '/api/postgres/port',
+    requireSession,
+    route(async (req, res) => {
+      const session = req.session!;
+      const next = port(req.body?.port, 'Port');
+      const current = Number((await runPgSql(session, 'SHOW port;')).trim());
+      if (next === current) {
+        res.json({ ok: true, from: current, to: next, notes: ['Already on that port.'] });
+        return;
+      }
+      const busy = await run(session, `ss -Htln | awk '{print $4}' | grep -Eq ':${next}$' && echo busy || true`, true);
+      need(busy.stdout.trim() !== 'busy', `Port ${next} is already in use on this server`);
+
+      const source = await runPgJson<{ file: string | null; line: number | null; config: string }>(
+        session,
+        `SELECT json_build_object('file', sourcefile, 'line', sourceline, 'config', current_setting('config_file')) FROM pg_settings WHERE name = 'port';`,
+      );
+      let file = source.file && !source.file.endsWith('postgresql.auto.conf') ? source.file : source.config;
+      if (source.file?.endsWith('postgresql.auto.conf')) await runPgSql(session, 'ALTER SYSTEM RESET port;');
+      need(/^\/[\w./-]+$/.test(file), 'Could not find the PostgreSQL config file');
+      file = file.trim();
+      const backup = `${file}.ssher-bak-port`;
+      const line = source.file === file && source.line ? source.line : 0;
+      const setting = `port = ${next}    # set by SSHer ${new Date().toISOString().slice(0, 10)} (was ${current})`;
+
+      await runOrThrow(session, `cp -a '${file}' '${backup}'`);
+      await runOrThrow(
+        session,
+        line
+          ? `sed -i '${line}s/.*/${setting.replace(/[/&]/g, '\\$&')}/' '${file}'`
+          : `printf '\\n%s\\n' '${setting}' >> '${file}'`,
+      );
+
+      const restart = await run(session, 'systemctl restart postgresql 2>&1 && sleep 2 && pg_lsclusters --no-header 2>/dev/null || true');
+      const now = await runPgSql(session, 'SHOW port;').then((p) => Number(p.trim())).catch(() => 0);
+      if (now !== next) {
+        await run(session, `cp -a '${backup}' '${file}' && systemctl restart postgresql`);
+        throw new Error(`PostgreSQL did not come back on ${next}, so the old config was restored:\n${(restart.stdout + restart.stderr).trim()}`);
+      }
+
+      const notes: string[] = [`PostgreSQL now listens on ${next} (was ${current}). Backup of the old config: ${backup}`];
+      const fw = await firewall(session, current);
+      if (fw.active && fw.containersAllowed) {
+        await allowContainersThroughFirewall(session, next);
+        notes.push(`Docker containers are allowed through ufw on ${next} too. The old ${current} rule is left in place; remove it on the Ports page.`);
+      }
+      retargetPgTunnel(session.id, next);
+      notes.push(`Anything that connects on ${current} must be changed to ${next} — e.g. DB_PORT in a compose file — and restarted.`);
+      res.json({ ok: true, from: current, to: next, notes });
     }),
   );
 

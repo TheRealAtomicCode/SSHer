@@ -598,6 +598,17 @@ function deploySteps(s: DeploySpec): Step[] {
     command: `cd ${dir} && docker compose up -d 2>&1`,
   });
   steps.push({ title: 'Check it is running', command: `cd ${dir} && docker compose ps 2>&1` });
+  steps.push({
+    // `up -d` returns as soon as the container is created; an app missing its settings
+    // then exits and restarts forever. Waiting a moment and checking catches that here,
+    // with the reason, instead of on the Docker page later.
+    title: 'Check it stays up',
+    command:
+      `cd ${dir} && sleep 12 && ids=$(docker compose ps -a -q) && ` +
+      `bad=$(docker inspect --format '{{.Name}} {{.State.Status}} restarts={{.RestartCount}} exit={{.State.ExitCode}}' $ids | awk '$2 != "running" || $3 != "restarts=0"'); ` +
+      `if [ -n "$bad" ]; then echo "Not staying up: $bad"; echo; echo 'Last log lines:'; docker compose logs --tail 40 --no-log-prefix 2>&1; exit 1; fi; ` +
+      `echo 'still running after 12s'`,
+  });
 
   if (s.domain) {
     const content = renderNginxSite({ name: s.name, domain: s.domain, target: `${s.bindAddr}:${s.hostPort}`, maxBody: s.maxBody });

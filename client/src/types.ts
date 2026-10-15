@@ -347,6 +347,61 @@ export interface NginxSite {
   originPull: boolean;
 }
 
+// -------------------------------------------------------------------- stacks
+
+export interface StackRef {
+  dir: string;
+  files: string[];
+  project: string;
+}
+
+export interface StackService {
+  name: string;
+  image: string;
+  hasBuild: boolean;
+  imagePresent: boolean;
+  ports: string[];
+  state: string | null;
+  container: string | null;
+}
+
+export interface StackSetting {
+  line: number;
+  block: string;
+  key: string;
+  value: string;
+  secret: boolean;
+  placeholder: boolean;
+  listForm: boolean;
+  comment: string;
+}
+
+export interface StackSummary extends StackRef {
+  services: StackService[];
+  error: string;
+  placeholders: number;
+  running: number;
+}
+
+export interface StackDetail extends StackSummary {
+  settings: StackSetting[];
+  /** The first compose file as text, for the raw editor. */
+  raw: string;
+  /** `stat` mode + owner of the compose file, e.g. "600 root". */
+  mode: string;
+}
+
+export interface StackCrash {
+  service: string;
+  container: string;
+  state: string;
+  restarts: number;
+  exitCode: number;
+  logs: string;
+}
+
+export type StackOp = 'up' | 'validate' | 'pull' | 'restart' | 'stop' | 'down';
+
 export interface NginxSiteSpec {
   name: string;
   domain: string;
@@ -520,6 +575,8 @@ export interface PgHbaState {
   /** SHOW listen_addresses — 'localhost' means containers can't reach it. */
   listenAddresses: string;
   hasDocker: boolean;
+  /** ufw: with default-deny on, containers also need a rule to reach the port. */
+  firewall: { active: boolean; containersAllowed: boolean };
   rules: PgHbaRule[];
   clusters: { version: string; name: string; port: number; online: boolean }[];
   /** `docker ps` lines that look like a PostgreSQL. */

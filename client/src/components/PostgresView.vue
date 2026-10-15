@@ -241,6 +241,10 @@ const listensForContainers = computed(() => {
   return value.split(',').some((a) => a.trim() === '*' || a.trim().startsWith('172.') || a.trim() === '0.0.0.0');
 });
 
+/** ufw on with default-deny drops a container's connection to the host like any other
+ *  incoming one — so pg_hba and listen_addresses alone aren't enough there. */
+const firewallBlocksContainers = computed(() => Boolean(hba.value?.firewall?.active && !hba.value.firewall.containersAllowed));
+
 async function allowContainers() {
   const h = hba.value;
   if (!h) return;
@@ -248,12 +252,21 @@ async function allowContainers() {
   if (
     !confirm(
       'Let Docker containers (the DeviseHR API via host.docker.internal) log in with a password?\n\n' +
-        '• pg_hba: host all all 172.16.0.0/12 scram-sha-256\n' +
+        (containerLoginsAllowed.value ? '' : '• pg_hba: host all all 172.16.0.0/12 scram-sha-256\n') +
         (restart ? `• listen_addresses: '${h.listenAddresses}' → '*', and PostgreSQL RESTARTS (open connections drop for a few seconds)\n` : '') +
-        '\nKeep port ' + h.port + ' closed in the firewall (Ports page) — the containers reach it from inside the server.',
+        (firewallBlocksContainers.value ? `• ufw: allow ${h.port}/tcp from 172.16.0.0/12 only (Docker's networks — not the internet)\n` : '') +
+        '\nPort ' + h.port + ' stays closed to the internet — the containers reach it from inside the server.',
     )
   )
     return;
+  if (firewallBlocksContainers.value) {
+    try {
+      await api.postgresAllowContainersFirewall();
+    } catch (err) {
+      fail(err);
+      return;
+    }
+  }
   if (!containerLoginsAllowed.value) {
     if (!(await addHbaRule({ type: 'host', database: 'all', user: 'all', address: '172.16.0.0/12', method: 'scram-sha-256' }, true))) return;
   }
@@ -270,6 +283,37 @@ async function allowContainers() {
   }
   notify('Containers can now log in with a password');
   await loadHba();
+}
+
+const portDraft = ref<number | null>(null);
+const portNotes = ref<string[]>([]);
+
+async function changePort() {
+  const h = hba.value;
+  const next = portDraft.value;
+  if (!h || !next || next === h.port) return;
+  if (
+    !confirm(
+      `Move PostgreSQL from port ${h.port} to ${next}?\n\n` +
+        '• PostgreSQL RESTARTS — open connections drop for a few seconds\n' +
+        '• the port line in its config file is rewritten (a backup is kept); if it does not come back up, the old file is restored\n' +
+        '• an open SSH tunnel follows to the new port; a ufw rule for containers is copied to it\n\n' +
+        `Apps set to ${h.port} (DB_PORT in a compose file, connection strings) must be changed to ${next} afterwards.`,
+    )
+  )
+    return;
+  hbaBusy.value = true;
+  try {
+    const res = await api.postgresSetPort(next);
+    portNotes.value = res.notes;
+    notify(`PostgreSQL is now on port ${res.to}`);
+    portDraft.value = null;
+    await Promise.all([loadHba(), loadTunnel()]);
+  } catch (err) {
+    fail(err);
+  } finally {
+    hbaBusy.value = false;
+  }
 }
 
 /** Other PostgreSQLs on the box — the usual reason a correct password "fails". */
@@ -826,6 +870,29 @@ const label = 'mb-1.5 block text-xs font-medium text-slate-400';
                 <button class="ml-2 text-slate-500 hover:text-white" title="Refresh" @click="loadHba"><v-icon name="fa-sync-alt" scale="0.7" /></button>
               </p>
 
+              <div class="mb-3 flex flex-wrap items-center gap-2 rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2">
+                <span class="text-slate-400">Port</span>
+                <input
+                  :value="portDraft ?? hba.port"
+                  type="number"
+                  min="1"
+                  max="65535"
+                  class="w-24 rounded-md border border-slate-700 bg-slate-950 px-2 py-1 font-mono text-xs text-slate-100 focus:border-sky-500 focus:outline-none"
+                  @input="portDraft = Number(($event.target as HTMLInputElement).value) || null"
+                />
+                <button
+                  :disabled="hbaBusy || !portDraft || portDraft === hba.port"
+                  class="rounded-lg border border-slate-700 px-2.5 py-1 text-slate-300 hover:border-sky-500 hover:text-white disabled:opacity-40"
+                  @click="changePort"
+                >
+                  Change port
+                </button>
+                <span class="text-[11px] text-slate-500">5432 is the standard. Moves the server, its firewall rule and the SSH tunnel together.</span>
+                <div v-if="portNotes.length" class="w-full text-[11px] text-sky-200">
+                  <p v-for="n in portNotes" :key="n">• {{ n }}</p>
+                </div>
+              </div>
+
               <div v-if="otherServers.length" class="mb-3 rounded-lg border border-amber-800/50 bg-amber-950/30 px-3 py-2 text-amber-200">
                 <p class="font-medium">This server runs more than one PostgreSQL:</p>
                 <ul class="mt-1 list-disc pl-5 font-mono text-[11px] text-amber-100/80">
@@ -850,12 +917,12 @@ const label = 'mb-1.5 block text-xs font-medium text-slate-400';
               </div>
 
               <div v-if="hba.hasDocker" class="mb-3 flex flex-wrap items-center gap-2">
-                <template v-if="containerLoginsAllowed && listensForContainers">
-                  <span class="flex items-center gap-1.5 text-emerald-300"><v-icon name="fa-check-circle" scale="0.75" /> Docker containers can log in with a password (172.16.0.0/12, listening on '{{ hba.listenAddresses }}').</span>
+                <template v-if="containerLoginsAllowed && listensForContainers && !firewallBlocksContainers">
+                  <span class="flex items-center gap-1.5 text-emerald-300"><v-icon name="fa-check-circle" scale="0.75" /> Docker containers can log in with a password (172.16.0.0/12, listening on '{{ hba.listenAddresses }}'<template v-if="hba.firewall?.active">, allowed through ufw</template>).</span>
                 </template>
                 <template v-else>
                   <span class="text-amber-300">
-                    Docker containers can't reach this PostgreSQL yet<template v-if="!listensForContainers"> — it only listens on '{{ hba.listenAddresses }}'</template><template v-if="!containerLoginsAllowed">{{ listensForContainers ? ' —' : ',' }} no password rule for 172.16.0.0/12</template>.
+                    Docker containers can't reach this PostgreSQL yet<template v-if="!listensForContainers"> — it only listens on '{{ hba.listenAddresses }}'</template><template v-if="!containerLoginsAllowed">{{ listensForContainers ? ' —' : ',' }} no password rule for 172.16.0.0/12</template><template v-if="firewallBlocksContainers"> — ufw blocks them on {{ hba.port }}</template>.
                   </span>
                   <button class="rounded-lg bg-emerald-600 px-3 py-1.5 font-semibold text-white hover:bg-emerald-500 disabled:opacity-50" :disabled="hbaBusy" @click="allowContainers">
                     Allow containers

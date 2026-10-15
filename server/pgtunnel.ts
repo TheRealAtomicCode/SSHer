@@ -74,6 +74,13 @@ export function stopPgTunnel(sessionId: string): void {
   tunnel.server.close();
 }
 
+/** Points an open tunnel at PostgreSQL's new port after a port change, so pgAdmin keeps
+ *  working without anyone reopening it. Each new connection reads `remotePort` afresh. */
+export function retargetPgTunnel(sessionId: string, remotePort: number): void {
+  const tunnel = tunnels.get(sessionId);
+  if (tunnel) tunnel.remotePort = remotePort;
+}
+
 /** The port Postgres is configured on — not always 5432 (a second cluster on a
  *  Debian box is 5433). Falls back to the default if psql can't be asked. */
 async function postgresPort(session: SshSession): Promise<number> {

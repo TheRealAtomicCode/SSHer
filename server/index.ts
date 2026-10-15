@@ -15,6 +15,7 @@ import { registerPermissions } from './permissions.js';
 import { registerMonitor } from './monitor.js';
 import { registerSpeedTest } from './speedtest.js';
 import { registerSecurity } from './security.js';
+import { registerStacks } from './stacks.js';
 import { registerTwoFactor } from './twofa.js';
 import { registerPgBackRest } from './pgbackrest.js';
 import { registerDbTransfer } from './dbtransfer.js';
@@ -631,6 +632,7 @@ registerPgBackRest(app, requireSession as express.RequestHandler, asyncRoute);
 registerMonitor(app, requireSession as express.RequestHandler, asyncRoute);
 registerSpeedTest(app, requireSession as express.RequestHandler, asyncRoute);
 registerSecurity(app, requireSession as express.RequestHandler, asyncRoute);
+registerStacks(app, requireSession as express.RequestHandler, asyncRoute);
 registerTwoFactor(app, requireSession as express.RequestHandler, asyncRoute);
 
 app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {

@@ -99,9 +99,15 @@ import {
   FaWindowMaximize,
   FaWrench,
   SiDotnet,
+  FaDice,
+  FaLayerGroup,
+  FaSlidersH,
 } from 'oh-vue-icons/icons';
 
 addIcons(
+  FaSlidersH,
+  FaDice,
+  FaLayerGroup,
   FaAngleDown,
   FaArchive,
   FaArrowLeft,

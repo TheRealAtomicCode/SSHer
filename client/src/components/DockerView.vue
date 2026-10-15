@@ -5,12 +5,13 @@ import { ApiError } from '../api';
 import { fail, notify } from '../toast';
 import { isCancelled, trackUpload } from '../backgroundTasks';
 import { newTransferId } from '../transferProgress';
-import type { ComposeInfo, ComposeOp, Container, DockerImage, Session, StepResult } from '../types';
+import type { ComposeInfo, ComposeOp, Container, DockerImage, Session, StackRef, StepResult } from '../types';
 import DeployWizard from './DeployWizard.vue';
 import ContainerConfig from './ContainerConfig.vue';
 import ContainerLinks from './ContainerLinks.vue';
 import ContainerNetwork from './ContainerNetwork.vue';
 import LogViewer from './LogViewer.vue';
+import StacksView from './StacksView.vue';
 import StepLog from './StepLog.vue';
 
 /** `route` is the container + tab from the URL (#/docker/<name>/<tab>); the page reports
@@ -22,7 +23,15 @@ const emit = defineEmits<{
   route: [{ container?: string; tab?: string }];
 }>();
 
-const tab = ref<'containers' | 'images'>('containers');
+const tab = ref<'containers' | 'images' | 'stacks'>('containers');
+/** A dropped .yml, or a project to open, handed to the Stacks tab. */
+const incomingYml = ref<{ name: string; content: string } | null>(null);
+const stackToOpen = ref<StackRef | null>(null);
+
+function openStack(compose: ComposeInfo) {
+  stackToOpen.value = { dir: compose.workingDir, files: compose.configFiles, project: compose.project };
+  tab.value = 'stacks';
+}
 const loading = ref(true);
 const available = ref(true);
 const unavailableReason = ref('');
@@ -312,14 +321,24 @@ async function onDrop(e: DragEvent) {
   dragDepth = 0;
   dropping.value = false;
   const file = e.dataTransfer?.files[0];
-  if (file) await loadImageFile(file);
+  if (file) await loadFile(file);
+}
+
+/** A compose file starts a new stack; anything else is treated as an image archive. */
+async function loadFile(file: File) {
+  if (/\.(ya?ml)$/i.test(file.name)) {
+    incomingYml.value = { name: file.name, content: await file.text() };
+    tab.value = 'stacks';
+    return;
+  }
+  await loadImageFile(file);
 }
 
 async function onPick(e: Event) {
   const input = e.target as HTMLInputElement;
   const file = input.files?.[0];
   input.value = '';
-  if (file) await loadImageFile(file);
+  if (file) await loadFile(file);
 }
 
 async function loadImageFile(file: File) {
@@ -401,7 +420,7 @@ const btn = 'rounded-md p-1.5 text-slate-400 transition hover:bg-slate-800 hover
         </div>
         <div class="ml-4 flex rounded-lg border border-slate-700 p-0.5 text-xs">
           <button
-            v-for="t in ['containers', 'images'] as const"
+            v-for="t in ['containers', 'stacks', 'images'] as const"
             :key="t"
             class="rounded-md px-3 py-1 capitalize transition"
             :class="tab === t ? 'bg-slate-700 text-white' : 'text-slate-400 hover:text-white'"
@@ -447,14 +466,14 @@ const btn = 'rounded-md p-1.5 text-slate-400 transition hover:bg-slate-800 hover
               <v-icon name="fa-file-upload" class="text-sky-300" scale="1.1" />
             </div>
             <div class="min-w-0 flex-1">
-              <p class="text-sm font-medium text-white">Drag & drop a Docker image here to deploy it</p>
+              <p class="text-sm font-medium text-white">Drag & drop a Docker image (.tar) or a compose file (.yml) here</p>
               <p class="text-xs text-slate-500">
                 A .tar from <code class="text-slate-400">docker save -o app.tar my-app:latest</code> — it's uploaded,
                 loaded with docker load, then the wizard asks the port, domain and storage.
               </p>
             </div>
             <span class="shrink-0 rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-300">Choose file</span>
-            <input type="file" accept=".tar,.gz,.tgz,.xz,.zst" class="hidden" @change="onPick" />
+            <input type="file" accept=".tar,.gz,.tgz,.xz,.zst,.yml,.yaml" class="hidden" @change="onPick" />
           </label>
 
           <!-- Containers -->
@@ -479,6 +498,13 @@ const btn = 'rounded-md p-1.5 text-slate-400 transition hover:bg-slate-800 hover
                     @click="emit('openPath', { path: g.compose.workingDir, isDirectory: true })"
                   >
                     <v-icon name="fa-folder-open" scale="0.7" /> Folder
+                  </button>
+                  <button
+                    class="rounded-md px-2 py-1 text-xs text-sky-300 hover:bg-sky-500/10"
+                    title="Its settings as a form, its images, and deploy"
+                    @click="openStack(g.compose)"
+                  >
+                    <v-icon name="fa-sliders-h" scale="0.7" /> Settings
                   </button>
                   <button class="rounded-md px-2 py-1 text-xs text-slate-400 hover:bg-slate-800 hover:text-white" @click="composeOp(g.compose, 'config')">
                     <v-icon name="fa-check" scale="0.7" /> Validate
@@ -567,6 +593,17 @@ const btn = 'rounded-md p-1.5 text-slate-400 transition hover:bg-slate-800 hover
               </div>
             </div>
           </template>
+
+          <StacksView
+            v-else-if="tab === 'stacks'"
+            :query="query"
+            :incoming="incomingYml"
+            :open-ref="stackToOpen"
+            @consumed="incomingYml = null; stackToOpen = null"
+            @changed="refresh"
+            @open-path="emit('openPath', $event)"
+            @open-logs="emit('openLogs', $event)"
+          />
 
           <!-- Images -->
           <div v-else class="overflow-hidden rounded-xl border border-slate-800">
@@ -752,14 +789,33 @@ const btn = 'rounded-md p-1.5 text-slate-400 transition hover:bg-slate-800 hover
         <ContainerNetwork v-else-if="detailTab === 'network'" :key="selected.id" :container="selected" />
 
         <!-- Config files -->
-        <ContainerConfig
-          v-else-if="detailTab === 'config'"
-          :key="selected.id"
-          :container="selected"
-          @open-path="emit('openPath', $event)"
-          @apply="onConfigApply"
-          @changed="refresh"
-        />
+        <div v-else-if="detailTab === 'config'" class="space-y-3">
+          <div v-if="selected.compose" class="flex flex-wrap gap-1.5">
+            <button
+              class="flex items-center gap-1.5 rounded-lg border border-sky-800 px-3 py-1.5 text-xs text-sky-300 hover:bg-sky-500/10"
+              title="Every setting in its compose file as a form, its images, and deploy"
+              @click="openStack(selected.compose)"
+            >
+              <v-icon name="fa-sliders-h" scale="0.7" /> Edit its settings as a form
+            </button>
+            <button
+              v-for="f in selected.compose.configFiles"
+              :key="f"
+              class="flex min-w-0 items-center gap-1.5 rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-300 hover:border-sky-500"
+              :title="`Show ${f} in the File Explorer`"
+              @click="emit('openPath', { path: f, isDirectory: false, reveal: true })"
+            >
+              <v-icon name="fa-folder-open" scale="0.65" /> <span class="truncate font-mono">{{ f.split('/').pop() }}</span>
+            </button>
+          </div>
+          <ContainerConfig
+            :key="selected.id"
+            :container="selected"
+            @open-path="emit('openPath', $event)"
+            @apply="onConfigApply"
+            @changed="refresh"
+          />
+        </div>
 
         <!-- Logs -->
         <div v-else-if="detailTab === 'logs'" class="flex h-full flex-col">

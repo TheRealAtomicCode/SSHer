@@ -50,6 +50,11 @@ import type {
   Session,
   Signal,
   StepResult,
+  StackCrash,
+  StackDetail,
+  StackOp,
+  StackRef,
+  StackSummary,
   SudoChange,
   SystemGroup,
   SystemUser,
@@ -563,6 +568,36 @@ export function nginxDeleteSite(name: string): Promise<{ output: string }> {
   return request(`/nginx/sites/${encodeURIComponent(name)}/delete`, { method: 'POST' });
 }
 
+// -------------------------------------------------------------------- stacks
+
+export function stacks(): Promise<{ stacks: StackSummary[] }> {
+  return request('/stacks');
+}
+
+export function stackDetail(ref: StackRef): Promise<StackDetail> {
+  return request('/stacks/detail', { method: 'POST', body: json(ref) });
+}
+
+export function stackSaveSettings(ref: StackRef, edits: { line: number; key: string; value: string }[]): Promise<{ saved: number }> {
+  return request('/stacks/settings', { method: 'POST', body: json({ ...ref, edits }) });
+}
+
+export function stackSaveRaw(ref: StackRef, content: string): Promise<void> {
+  return request('/stacks/raw', { method: 'POST', body: json({ ...ref, content }) });
+}
+
+export function stackCreate(spec: { dir: string; content: string; overwrite?: boolean }): Promise<{ dir: string; files: string[] }> {
+  return request('/stacks', { method: 'POST', body: json(spec) });
+}
+
+export function stackOp(
+  ref: StackRef,
+  op: StackOp,
+  opts: { services?: string[]; force?: boolean } = {},
+): Promise<{ ok: boolean; log: StepResult[]; crashed: StackCrash[] }> {
+  return request('/stacks/op', { method: 'POST', body: json({ ...ref, op, ...opts }) });
+}
+
 // -------------------------------------------------------------------- .NET
 
 export function dotnetContext(): Promise<DotnetContext> {
@@ -724,6 +759,14 @@ export function postgresHbaAdd(rule: { type: string; database: string; user: str
 
 export function postgresSetListen(value: string): Promise<void> {
   return request('/postgres/listen', { method: 'POST', body: json({ value }) });
+}
+
+export function postgresAllowContainersFirewall(): Promise<{ output: string }> {
+  return request('/postgres/firewall-containers', { method: 'POST' });
+}
+
+export function postgresSetPort(port: number): Promise<{ from: number; to: number; notes: string[] }> {
+  return request('/postgres/port', { method: 'POST', body: json({ port }) });
 }
 
 export function postgresHbaRemove(line: number): Promise<void> {

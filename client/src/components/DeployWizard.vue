@@ -179,6 +179,33 @@ function addEnv(key = '', value = '') {
   spec.env.push({ key, value });
 }
 
+const pasting = ref(false);
+const pasted = ref('');
+
+/** Bulk import: `.env` lines (KEY=value) or compose environment lines (KEY: "value").
+ *  A key already in the list is updated rather than added twice. */
+function importPasted() {
+  let added = 0;
+  for (const raw of pasted.value.split(/\r?\n/)) {
+    const line = raw.trim().replace(/^export\s+/, '').replace(/^-\s+/, '');
+    if (!line || line.startsWith('#')) continue;
+    const m = /^([A-Za-z_][A-Za-z0-9_.]*)\s*(?:=|:\s)\s*(.*)$/.exec(line);
+    if (!m) continue;
+    let value = m[2].trim();
+    if (value.length >= 2 && (value[0] === '"' || value[0] === "'") && value.at(-1) === value[0]) value = value.slice(1, -1);
+    const existing = spec.env.find((e) => e.key === m[1]);
+    if (existing) existing.value = value;
+    else spec.env.push({ key: m[1], value });
+    added++;
+  }
+  pasted.value = '';
+  pasting.value = false;
+  if (!added) fail(new Error('No KEY=value or KEY: value lines found'));
+}
+
+/** Nothing configured at all — the usual reason an app restarts forever right after deploy. */
+const noSettings = computed(() => !spec.env.some((e) => e.key) && !spec.envFile.trim());
+
 onMounted(async () => {
   try {
     ctx.value = await api.dockerContext();
@@ -439,7 +466,20 @@ const hint = 'mt-1 text-[11px] text-slate-500';
           <div>
             <div class="mb-1.5 flex items-center justify-between">
               <label class="text-xs font-medium text-slate-400">Environment variables</label>
-              <button class="text-xs text-sky-400 hover:text-sky-300" @click="addEnv()">+ Add</button>
+              <span class="flex gap-3">
+                <button class="text-xs text-sky-400 hover:text-sky-300" @click="pasting = !pasting">Paste .env / YAML</button>
+                <button class="text-xs text-sky-400 hover:text-sky-300" @click="addEnv()">+ Add</button>
+              </span>
+            </div>
+            <div v-if="pasting" class="mb-3">
+              <textarea
+                v-model="pasted"
+                spellcheck="false"
+                placeholder="DB_PASSWORD=…&#10;token__SecretKey: &quot;…&quot;"
+                class="h-32 w-full rounded-lg border border-slate-700 bg-slate-950 p-2 font-mono text-[11px] text-slate-200 focus:border-sky-500 focus:outline-none"
+              />
+              <button class="mt-1 rounded-lg bg-sky-600 px-3 py-1 text-xs font-semibold text-white hover:bg-sky-500" @click="importPasted">Import</button>
+              <span class="ml-2 text-[11px] text-slate-500">For a multi-service app with many settings, a <b>stack</b> (Stacks tab) is easier to manage.</span>
             </div>
             <div v-for="(e, i) in spec.env" :key="i" class="mb-2 flex gap-2">
               <input v-model="e.key" placeholder="KEY" :class="[field, 'w-2/5 font-mono']" />
@@ -506,6 +546,11 @@ const hint = 'mt-1 text-[11px] text-slate-500';
               <v-icon name="fa-spinner" class="animate-spin text-sky-400" scale="1.4" />
             </div>
             <template v-else>
+              <p v-if="noSettings" class="rounded-lg border border-amber-800/50 bg-amber-950/30 px-3 py-2 text-xs text-amber-200">
+                <v-icon name="fa-exclamation-triangle" scale="0.65" /> No environment variables and no env file. An app that needs settings
+                (database, secrets, URLs) will exit and restart forever. Go back to <b>Environment</b> to add them — or deploy anyway; the last
+                step checks it stays up and shows its logs if not.
+              </p>
               <div>
                 <p class="mb-2 text-xs font-medium text-slate-400">The site will run these steps on the server:</p>
                 <ol class="space-y-1">

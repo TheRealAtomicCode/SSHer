@@ -164,6 +164,29 @@ Both run plain shell commands over the SSH session (`docker`, `docker compose`, 
   Kinds are `postgres`, `redis`, `http` and `tcp`. Fields name env variables: `host`, `port`,
   `database`, `user`, `password`, `url`, or `connstr` (an Npgsql `Host=…;` or StackExchange.Redis
   `host:port,password=…` string).
+- **Every deploy checks the app stays up.** `up -d` returns as soon as a container exists; an
+  app missing its settings then exits and restarts forever. Both deploy flows wait ~12s, and
+  if a container isn't steadily running they show its exit code and last log lines.
+- **Stacks** (Docker → Stacks tab) are whole compose projects: API, front end, Redis, MinIO in
+  one file. Bring the file by uploading it, pasting it, dropping a `.yml` on the Docker page,
+  or from a template. The panel then shows:
+  - each service's image, and whether it is on the server (**Upload .tar** next to any that isn't)
+  - every setting — each `KEY: value` under an `environment:` block or a top-level `x-…:`
+    block — as a form. Secrets are masked, have a random-value generator, and `CHANGE_ME`
+    values are flagged; **Deploy** refuses while any are left. Edits are written into the
+    file in place (comments kept, `$` escaped as `$$`) and checked with
+    `docker compose config` — a file compose rejects is put back.
+  - **Edit file** for the raw YAML, validated before it is saved
+  - Deploy / Restart / Stop for the ticked services, Remove containers (volumes kept)
+
+  Every compose project a running container came from appears here, plus any compose file
+  directly under `/opt/*/`. A compose group on the Containers tab has a **Settings** button
+  that opens it, and a container's Config tab shows (and reveals in Files) the yml it reads.
+- **PostgreSQL port** (PostgreSQL → Logins): change the port; the line that sets it is
+  rewritten where it actually is (Debian's `psql` wrapper reads it from there), PostgreSQL
+  restarts, and if it doesn't come back the old config is restored. A ufw rule for
+  containers and an open SSH tunnel follow to the new port. **Allow containers** now also
+  adds the ufw rule containers need when ufw is on (`5432/tcp` from `172.16.0.0/12` only).
 - **Ports & Firewall** shows each listening port as local / public / allow-listed / blocked,
   flags Docker-published ports (they bypass ufw), and adds, deletes or restricts ufw rules.
   It refuses to close the SSH port you are connected on without an explicit confirmation,
