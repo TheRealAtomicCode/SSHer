@@ -582,6 +582,25 @@ export function stackSaveSettings(ref: StackRef, edits: { line: number; key: str
   return request('/stacks/settings', { method: 'POST', body: json({ ...ref, edits }) });
 }
 
+export interface StackSecretPlan {
+  key: string;
+  anchor: string;
+  uses: string[];
+  actions: string[];
+  database: { user: string; name: string } | null;
+  warnings: string[];
+}
+
+/** Changes one secret everywhere it is used (file, database role, containers). `dryRun` = plan only. */
+export function stackChangeSecret(
+  ref: StackRef,
+  setting: { line: number; key: string },
+  value: string,
+  dryRun = false,
+): Promise<{ plan: StackSecretPlan; ok?: boolean; log?: StepResult[]; crashed?: StackCrash[] }> {
+  return request('/stacks/secret', { method: 'POST', body: json({ ...ref, ...setting, value, dryRun }) });
+}
+
 export function stackSaveRaw(ref: StackRef, content: string): Promise<void> {
   return request('/stacks/raw', { method: 'POST', body: json({ ...ref, content }) });
 }

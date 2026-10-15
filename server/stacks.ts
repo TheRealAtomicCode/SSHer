@@ -26,6 +26,7 @@ import {
   type AsyncRoute,
   type SessionRequest,
 } from './ops.js';
+import { runPgSql } from './postgres.js';
 import { shellQuote, type SshSession } from './ssh.js';
 
 const COMPOSE_NAMES = ['docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml'];
@@ -159,9 +160,12 @@ export function parseSettings(text: string): StackSetting[] {
     if (!list && !map) continue;
     const key = list ? list[2] : map![1];
     const rawValue = list ? list[3] : (map![2] ?? '');
-    // `<<: *anchor` and nested mappings aren't settings.
-    if (key === '<<' || /^[&*]/.test(rawValue.trim()) || (!list && !map![2] && lines[i + 1] && indentOf(lines[i + 1]) > indent)) continue;
-    const value = list ? rawValue.replace(/\$\$/g, '$') : unquote(rawValue);
+    // `<<: *anchor`, `KEY: *alias` (a reference to a value declared elsewhere — that
+    // declaration is the one shown) and nested mappings aren't settings. `KEY: &name "v"`
+    // IS one: the named value itself, e.g. a password in an x-secrets block.
+    const anchored = /^&[A-Za-z0-9_-]+(\s+|$)/.exec(rawValue.trim());
+    if (key === '<<' || rawValue.trim().startsWith('*') || (anchored && !rawValue.trim().slice(anchored[0].length)) || (!list && !map![2] && lines[i + 1] && indentOf(lines[i + 1]) > indent)) continue;
+    const value = list ? rawValue.replace(/\$\$/g, '$') : unquote(anchored ? rawValue.trim().slice(anchored[0].length) : rawValue);
     out.push({
       line: i + 1,
       block: envBlock,
@@ -190,11 +194,13 @@ export function applySettings(text: string, edits: { line: number; key: string; 
     if (s.listForm) {
       lines[e.line - 1] = `${pad}- ${quote(`${e.key}=${e.value}`)}${cr}`;
     } else {
-      // Keep a trailing comment after a quoted value.
-      const after = raw.trimEnd().replace(/\r$/, '').slice(raw.indexOf(':') + 1).trim();
+      // Keep an `&anchor` (other lines refer to it by name) and a trailing comment.
+      let after = raw.trimEnd().replace(/\r$/, '').slice(raw.indexOf(':') + 1).trim();
+      const anchor = /^&[A-Za-z0-9_-]+\s+/.exec(after)?.[0] ?? '';
+      after = after.slice(anchor.length);
       let tail = '';
       if (after.startsWith('"') || after.startsWith("'")) tail = after.slice(closingQuote(after) + 1);
-      lines[e.line - 1] = `${pad}${e.key}: ${quote(e.value)}${tail}${cr}`;
+      lines[e.line - 1] = `${pad}${e.key}: ${anchor}${quote(e.value)}${tail}${cr}`;
     }
   }
   return lines.join('\n');
@@ -368,6 +374,84 @@ export async function settleCheck(session: SshSession, base: string, services: s
   return bad;
 }
 
+// ------------------------------------------------------------- changing a secret
+
+/** `name: &anchor "value"` declarations anywhere in the file, anchor -> value. */
+function anchorValues(text: string): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const raw of text.split('\n')) {
+    const m = /^\s+[^\s:#][^:]*:\s+&([A-Za-z0-9_-]+)\s+(.+?)\s*$/.exec(raw.replace(/\r$/, ''));
+    if (m) out.set(m[1], unquote(m[2]));
+  }
+  return out;
+}
+
+/** Every `KEY: value` / `KEY: *alias` in the file, with aliases resolved — first one wins. */
+function resolvedEnv(text: string): Map<string, string> {
+  const anchors = anchorValues(text);
+  const out = new Map<string, string>();
+  for (const s of parseSettings(text)) if (!out.has(s.key)) out.set(s.key, s.value);
+  for (const raw of text.split('\n')) {
+    const m = /^\s+([A-Za-z_][A-Za-z0-9_.]*):\s+\*([A-Za-z0-9_-]+)\s*$/.exec(raw.replace(/\r$/, ''));
+    if (m && !out.has(m[1]) && anchors.has(m[2])) out.set(m[1], anchors.get(m[2])!);
+  }
+  return out;
+}
+
+const pgIdent = (name: string) => `"${name.replace(/"/g, '""')}"`;
+const pgLiteral = (value: string) => `'${value.replace(/'/g, "''")}'`;
+
+/** A database the server's own PostgreSQL serves — the only kind SSHer can change a password on. */
+const isLocalDb = (hostInDocker: string, host: string) =>
+  ['host.docker.internal', '172.17.0.1', 'localhost', '127.0.0.1'].includes(hostInDocker || host);
+
+interface SecretPlan {
+  key: string;
+  anchor: string;
+  /** The settings that take their value from this one (KEY: *anchor), plus itself. */
+  uses: string[];
+  /** What happens besides rewriting the line — shown before anything is done. */
+  actions: string[];
+  database: { user: string; name: string } | null;
+  warnings: string[];
+}
+
+/** Works out what changing the setting on `line` touches. */
+function planSecretChange(text: string, line: number, key: string): SecretPlan {
+  const setting = parseSettings(text).find((s) => s.line === line);
+  need(setting && setting.key === key, `Line ${line} is no longer ${key} — the file changed; reload it`);
+  const anchor = /:\s+&([A-Za-z0-9_-]+)/.exec(text.split('\n')[line - 1] ?? '')?.[1] ?? '';
+  const uses = new Set<string>([key]);
+  if (anchor) {
+    for (const raw of text.split('\n')) {
+      const m = new RegExp(`^\\s+([A-Za-z_][A-Za-z0-9_.]*):\\s+\\*${anchor}\\s*$`).exec(raw.replace(/\r$/, ''));
+      if (m) uses.add(m[1]);
+    }
+  }
+  const env = resolvedEnv(text);
+  const actions: string[] = [`Write the new value into the compose file (${uses.size > 1 ? `${[...uses].filter((u) => u !== key).join(', ')} follow it` : 'one place'})`];
+  const warnings: string[] = [];
+  let database: SecretPlan['database'] = null;
+
+  if (uses.has('DB_PASSWORD')) {
+    const user = env.get('DB_USER') ?? '';
+    const name = env.get('DB_NAME') ?? '';
+    if (!user) warnings.push('DB_USER is not set, so the database password cannot be changed on the server.');
+    else if (!isLocalDb(env.get('DB_HOST_IN_DOCKER') ?? '', env.get('DB_HOST') ?? '')) {
+      warnings.push(`The database is not on this server (${env.get('DB_HOST_IN_DOCKER') || env.get('DB_HOST')}) — change ${user}'s password there first, then here.`);
+    } else {
+      database = { user, name };
+      actions.push(`Change PostgreSQL role "${user}"'s password on this server (ALTER ROLE)`);
+    }
+  }
+  if (uses.has('REDIS_PASSWORD')) actions.push('Redis restarts with the new password (sessions are kept on disk)');
+  if (uses.has('MINIO_ROOT_PASSWORD') || uses.has('MINIO_ROOT_USER')) actions.push('MinIO restarts with the new root login (stored files are kept)');
+  if ([...uses].some((u) => /SecretKey$/.test(u) && /^token__|^refreshToken__/.test(u))) warnings.push('Everyone is signed out: tokens signed with the old key stop being valid.');
+  if ([...uses].some((u) => /^Email__(Password|Username)$/.test(u))) warnings.push('This only changes what the app logs in with — change the mailbox password on the mail server too.');
+  actions.push('Recreate the running containers whose settings changed (docker compose up -d), then check they stay up');
+  return { key, anchor, uses: [...uses], actions, database, warnings };
+}
+
 // --------------------------------------------------------------------- routes
 
 export function registerStacks(app: Express, requireSession: import('express').RequestHandler, asyncRoute: AsyncRoute): void {
@@ -425,6 +509,94 @@ export function registerStacks(app: Express, requireSession: import('express').R
         throw new Error(`docker compose rejected the file, so it was put back:\n${(check.stdout + check.stderr).trim()}`);
       }
       res.json({ ok: true, saved: edits.length });
+    }),
+  );
+
+  /**
+   * Changes one secret EVERYWHERE it is used, so the stack keeps working: the line in the
+   * compose file (every `*alias` follows it), the PostgreSQL role's password when it is the
+   * database password, and the running containers whose settings changed — Redis and MinIO
+   * take their password from their environment at start, so recreating them is the change.
+   *
+   * `dryRun` returns the plan only. Order matters: the file first (validated, put back if
+   * compose rejects it), then the database (file put back if ALTER ROLE fails), then the
+   * containers — so a failure never leaves the file and the database disagreeing.
+   */
+  app.post(
+    '/api/stacks/secret',
+    requireSession,
+    route(async (req, res) => {
+      const session = req.session!;
+      const ref = parseRef(req.body ?? {});
+      const base = composeBase(ref);
+      const line = Number(req.body?.line);
+      const key = str(req.body?.key);
+      const value = String(req.body?.value ?? '');
+      const file = ref.files[0];
+      const before = await readRoot(session, file);
+      const plan = planSecretChange(before, line, key);
+      if (req.body?.dryRun) {
+        res.json({ plan });
+        return;
+      }
+      need(value.trim(), 'The new value is empty');
+      need(!/[\n\r]/.test(value), 'The value cannot contain a line break');
+      need(!PLACEHOLDER.test(value), 'That is a placeholder, not a value');
+      // JWT signing keys (token__SecretKey …) are HMAC-SHA512 in the apps SSHer deploys, and .NET
+      // refuses a key of 512 bits or fewer — every sign-in then fails with IDX10720.
+      if (plan.uses.some((u) => /Token__SecretKey$|^token__SecretKey$/i.test(u))) {
+        need(
+          new TextEncoder().encode(value).length > 64,
+          `A signing key must be longer than 64 bytes (more than 512 bits) — this one is ${new TextEncoder().encode(value).length}. Use the dice button for an 86-character key.`,
+        );
+      }
+
+      const log: { title: string; ok: boolean; output: string }[] = [];
+      try {
+        await writeRemote(session, file, applySettings(before, [{ line, key, value }]));
+        const check = await run(session, `${base} config --quiet 2>&1`);
+        if (check.code !== 0) {
+          await writeRemote(session, file, before);
+          throw new BadRequest(`docker compose rejected the file, so it was put back:\n${(check.stdout + check.stderr).trim()}`);
+        }
+        log.push({ title: `Write ${key} into ${file}`, ok: true, output: `${plan.uses.join(', ')} now use the new value` });
+
+        if (plan.database) {
+          try {
+            await runPgSql(
+              session,
+              `SET log_statement = 'none';\nALTER ROLE ${pgIdent(plan.database.user)} WITH PASSWORD ${pgLiteral(value)};`,
+            );
+          } catch (err) {
+            await writeRemote(session, file, before);
+            throw new BadRequest(`PostgreSQL refused the change, so the file was put back too: ${(err as Error).message.split('\n')[0]}`);
+          }
+          log.push({ title: `Change the password of PostgreSQL role "${plan.database.user}"`, ok: true, output: 'ALTER ROLE done' });
+        }
+
+        const running = (await run(session, `${base} ps --services --status running 2>/dev/null`, true)).stdout
+          .split('\n')
+          .map((s) => s.trim())
+          .filter((s) => RE.id.test(s));
+        if (!running.length) {
+          log.push({ title: 'Nothing is running', ok: true, output: 'The new value is used from the next Deploy.' });
+          res.json({ ok: true, log, crashed: [], plan });
+          return;
+        }
+        const up = await run(session, `${base} up -d ${running.map(shellQuote).join(' ')} 2>&1`);
+        log.push({ title: `Recreate what changed (${running.join(', ')})`, ok: up.code === 0, output: (up.stdout + up.stderr).trim() });
+        if (up.code !== 0) throw new Error('docker compose up failed');
+        const crashed = await settleCheck(session, base, running);
+        log.push({
+          title: 'Still running afterwards',
+          ok: !crashed.length,
+          output: crashed.length ? crashed.map((c) => `${c.service}: ${c.state}, exit ${c.exitCode}`).join('\n') : 'every container is up',
+        });
+        res.json({ ok: !crashed.length, log, crashed, plan });
+      } catch (err) {
+        if (err instanceof BadRequest) throw err;
+        res.status(500).json({ error: (err as Error).message, log });
+      }
     }),
   );
 

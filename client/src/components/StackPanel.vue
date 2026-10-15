@@ -87,11 +87,64 @@ const groups = computed(() => {
   return [...map.entries()];
 });
 
-/** 48 random bytes, base64url: never contains `$`, so compose can't mangle it. */
+/** 64 random bytes (86 base64url characters, 688 bits): enough for an HMAC-SHA512 signing key,
+ *  which must be LONGER than 512 bits — and it never contains `$`, so compose cannot mangle it. */
 function generate(s: StackSetting) {
-  const bytes = crypto.getRandomValues(new Uint8Array(48));
+  const bytes = crypto.getRandomValues(new Uint8Array(64));
   setValue(s, btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''));
   revealed[s.line] = true;
+}
+
+// ------------------------------------------------------- change a secret everywhere
+
+const change = ref<{
+  setting: StackSetting;
+  plan: api.StackSecretPlan | null;
+  value: string;
+  reveal: boolean;
+  busy: boolean;
+} | null>(null);
+
+async function startChange(s: StackSetting) {
+  if (dirtyCount.value && !confirm(`You have ${dirtyCount.value} unsaved setting(s). Save or undo them first — Change works on the saved file.`)) return;
+  change.value = { setting: s, plan: null, value: '', reveal: false, busy: false };
+  try {
+    change.value.plan = (await api.stackChangeSecret(ref_.value, s, '', true)).plan;
+  } catch (err) {
+    fail(err);
+    change.value = null;
+  }
+}
+
+function generateChange() {
+  if (!change.value) return;
+  const bytes = crypto.getRandomValues(new Uint8Array(64));
+  change.value.value = btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  change.value.reveal = true;
+}
+
+async function applyChange() {
+  const c = change.value;
+  if (!c || !c.value.trim()) return;
+  c.busy = true;
+  const log = reactive({ title: `Change ${c.setting.key} everywhere`, steps: [] as StepResult[], running: true, error: '' });
+  opLog.value = log;
+  try {
+    const res = await api.stackChangeSecret(ref_.value, c.setting, c.value);
+    log.steps = res.log ?? [];
+    crashed.value = res.crashed ?? [];
+    if (res.ok) notify(`${c.setting.key} changed everywhere`);
+    else log.error = 'Changed, but something did not come back up — see below.';
+    change.value = null;
+    emit('changed');
+    await load();
+  } catch (err) {
+    log.steps = err instanceof ApiError ? ((err.payload.log as StepResult[]) ?? []) : [];
+    log.error = (err as Error).message;
+  } finally {
+    log.running = false;
+    if (change.value) change.value.busy = false;
+  }
 }
 
 async function saveSettings() {
@@ -353,6 +406,11 @@ const ghost = 'rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate
               <p class="border-b border-slate-800 bg-slate-950/60 px-4 py-1.5 font-mono text-[11px] text-sky-300">
                 {{ block.startsWith('x-') ? block : `${block} → environment` }}
               </p>
+              <p v-if="block === 'x-secrets'" class="border-b border-slate-800 bg-amber-950/10 px-4 py-1.5 text-[11px] leading-snug text-slate-400">
+                Filling these in for the first time? Type them and <b>Save</b>. Changing one on a stack that is already running?
+                Use <b class="text-amber-300">Change</b> — it also changes the password in the database / Redis / MinIO and restarts
+                what uses it, so nothing ends up with the old one.
+              </p>
               <div
                 v-for="s in items"
                 :key="s.line"
@@ -380,6 +438,14 @@ const ghost = 'rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate
                   </button>
                   <button v-if="s.line in edits" class="rounded p-1 text-slate-500 hover:text-amber-300" title="Undo" @click="delete edits[s.line]">
                     <v-icon name="fa-undo" scale="0.6" />
+                  </button>
+                  <button
+                    v-if="s.block === 'x-secrets'"
+                    class="ml-1 rounded border border-amber-800/70 px-1.5 py-0.5 text-[10px] text-amber-300 hover:bg-amber-500/10"
+                    title="Change it everywhere it is used: the file, the database / Redis / MinIO, and the running containers"
+                    @click="startChange(s)"
+                  >
+                    Change
                   </button>
                 </div>
               </div>
@@ -430,6 +496,53 @@ const ghost = 'rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate
         >
           <v-icon name="fa-rocket" scale="0.7" /> Deploy
         </button>
+      </div>
+    </div>
+
+    <!-- Change a secret everywhere -->
+    <div v-if="change" data-modal class="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-sm">
+      <div class="w-full max-w-lg rounded-2xl border border-slate-700 bg-slate-900 p-5 shadow-2xl">
+        <h3 class="flex items-center gap-2 font-semibold text-white">
+          <v-icon name="fa-key" class="text-amber-300" /> Change <span class="font-mono">{{ change.setting.key }}</span>
+        </h3>
+        <div v-if="!change.plan" class="py-6 text-center"><v-icon name="fa-spinner" class="animate-spin text-sky-400" /></div>
+        <template v-else>
+          <p class="mt-2 text-xs text-slate-400">
+            Used by <span class="font-mono text-slate-200">{{ change.plan.uses.filter((u) => u !== change!.setting.key).join(', ') || 'only itself' }}</span>.
+            This will:
+          </p>
+          <ol class="mt-1.5 list-decimal space-y-0.5 pl-5 text-xs text-slate-300">
+            <li v-for="a in change.plan.actions" :key="a">{{ a }}</li>
+          </ol>
+          <p v-for="w in change.plan.warnings" :key="w" class="mt-2 rounded-lg border border-amber-800/50 bg-amber-950/30 px-3 py-1.5 text-xs text-amber-200">{{ w }}</p>
+          <label class="mt-4 mb-1.5 block text-xs font-medium text-slate-400">New value</label>
+          <div class="flex gap-1.5">
+            <input
+              v-model="change.value"
+              :type="change.reveal ? 'text' : 'password'"
+              autocomplete="new-password"
+              spellcheck="false"
+              class="min-w-0 flex-1 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-xs text-slate-100 focus:border-amber-500 focus:outline-none"
+            />
+            <button class="rounded-lg border border-slate-700 px-2.5 text-slate-400 hover:text-white" :title="change.reveal ? 'Hide' : 'Show'" @click="change.reveal = !change.reveal">
+              <v-icon :name="change.reveal ? 'fa-eye-slash' : 'fa-eye'" scale="0.7" />
+            </button>
+            <button class="rounded-lg border border-slate-700 px-2.5 text-slate-400 hover:text-sky-300" title="Generate a random value" @click="generateChange">
+              <v-icon name="fa-dice" scale="0.7" />
+            </button>
+          </div>
+          <p class="mt-1 text-[11px] text-slate-500">Copy it somewhere safe if you need it outside this server — it is only kept in the compose file.</p>
+        </template>
+        <div class="mt-5 flex justify-end gap-2">
+          <button class="rounded-lg px-3 py-1.5 text-sm text-slate-400 hover:bg-slate-800" :disabled="change.busy" @click="change = null">Cancel</button>
+          <button
+            :disabled="!change.plan || !change.value.trim() || change.busy"
+            class="rounded-lg bg-amber-600 px-4 py-1.5 text-sm font-semibold text-white hover:bg-amber-500 disabled:opacity-40"
+            @click="applyChange"
+          >
+            {{ change.busy ? 'Changing…' : 'Change everywhere' }}
+          </button>
+        </div>
       </div>
     </div>
 
