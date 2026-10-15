@@ -527,6 +527,8 @@ export interface PostgresContext {
   reachable: boolean;
   version: string;
   error: string;
+  /** PostgreSQL's own log tail, when it isn't running — the reason it stopped. */
+  log?: string;
 }
 
 /** The SSH tunnel to the server's PostgreSQL, opened on the machine running the

@@ -256,15 +256,57 @@ export function registerPostgres(app: Express, requireSession: import('express')
         res.json({ installed: false, running: false, reachable: false, version: '', error: '' });
         return;
       }
-      const state = await run(session, 'systemctl is-active postgresql 2>/dev/null || true');
       const check = await execAsPostgres(session, 'psql -At -q -c "SELECT version()" 2>&1');
+      const error = check.code === 0 ? '' : (check.stdout + check.stderr).trim();
+      // `systemctl is-active postgresql` is no help on Debian/Ubuntu: that unit is an
+      // umbrella that stays "active" while the real cluster (postgresql@17-main) is down.
+      // psql reaching the socket-file step and finding nothing there is the real signal —
+      // and it must not be reported as a sudo problem.
+      const down = /No such file or directory|Connection refused/.test(error) && /connection to server/.test(error);
+      const log = down
+        ? await run(
+            session,
+            `{ journalctl -u 'postgresql*' -n 30 --no-pager -o cat 2>/dev/null; tail -n 30 /var/log/postgresql/postgresql-*.log 2>/dev/null; } | tail -n 40`,
+          ).catch(() => null)
+        : null;
       res.json({
         installed: true,
-        running: state.stdout.trim() === 'active',
+        running: check.code === 0 || !down,
         reachable: check.code === 0,
         version: check.code === 0 ? check.stdout.trim() : '',
-        error: check.code === 0 ? '' : (check.stdout + check.stderr).trim(),
+        error,
+        log: log?.stdout.trim() ?? '',
       });
+    }),
+  );
+
+  /** Start / stop / restart every cluster unit by name — `postgresql` alone is the
+   *  Debian umbrella: it won't start a cluster that failed on its own, and its stop
+   *  returns before the cluster has actually shut down. Stop and restart drop every
+   *  open connection. */
+  app.post(
+    '/api/postgres/service/:action',
+    requireSession,
+    route(async (req, res) => {
+      const action = String(req.params.action);
+      need(['start', 'stop', 'restart'].includes(action), 'Unknown action');
+      const units = `postgresql $(systemctl list-units --all --plain --no-legend 'postgresql@*' | awk '{print $1}')`;
+      const command =
+        action === 'stop'
+          ? `systemctl stop ${units} 2>&1 && echo stopped`
+          : `systemctl reset-failed 'postgresql@*' 2>/dev/null; systemctl ${action} ${units} 2>&1 && echo ${action === 'start' ? 'started' : 'restarted'}`;
+      const title = { start: 'Start PostgreSQL', stop: 'Stop PostgreSQL', restart: 'Restart PostgreSQL' }[action]!;
+      const { log, ok } = await runSteps(req.session!, [{ title, command }]);
+      if (!ok) {
+        const tail = await run(
+          req.session!,
+          `{ journalctl -u 'postgresql*' -n 30 --no-pager -o cat 2>/dev/null; tail -n 30 /var/log/postgresql/postgresql-*.log 2>/dev/null; } | tail -n 40`,
+        ).catch(() => null);
+        log.push({ title: 'PostgreSQL log', ok: false, output: tail?.stdout.trim() || 'no log output found' });
+        res.status(500).json({ error: `${title} failed`, log });
+        return;
+      }
+      res.json({ ok: true, log });
     }),
   );
 

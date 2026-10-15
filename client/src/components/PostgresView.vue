@@ -576,6 +576,23 @@ async function installPostgres() {
   }
 }
 
+async function service(action: 'start' | 'stop' | 'restart') {
+  const verb = { start: 'Starting', stop: 'Stopping', restart: 'Restarting' }[action];
+  if (action !== 'start' && !confirm(`${action === 'stop' ? 'Stop' : 'Restart'} PostgreSQL?\n\nEvery open connection is dropped${action === 'stop' ? ', and apps using it fail until it is started again' : ''}.`)) return;
+  installing.value = true;
+  installLog.value = { title: `${verb} PostgreSQL`, steps: [], running: true, error: '' };
+  try {
+    const res = await api.postgresService(action);
+    installLog.value = { title: `${verb} PostgreSQL`, steps: res.log, running: false, error: '' };
+  } catch (err) {
+    const log = err instanceof ApiError ? ((err.payload.log as StepResult[]) ?? []) : [];
+    installLog.value = { title: `${verb} PostgreSQL`, steps: log, running: false, error: (err as Error).message };
+  } finally {
+    installing.value = false;
+    await refresh();
+  }
+}
+
 function select(role: PostgresRole) {
   selected.value = selected.value?.name === role.name ? null : role;
   tab.value = 'role';
@@ -785,6 +802,35 @@ const label = 'mb-1.5 block text-xs font-medium text-slate-400';
           </p>
         </div>
         <div class="flex-1" />
+        <template v-if="context?.installed">
+          <button
+            v-if="usable"
+            class="rounded-md p-2 text-slate-400 hover:bg-slate-800 hover:text-amber-300 disabled:opacity-40"
+            title="Restart PostgreSQL"
+            :disabled="installing"
+            @click="service('restart')"
+          >
+            <v-icon name="fa-redo" scale="0.85" />
+          </button>
+          <button
+            v-if="usable"
+            class="rounded-md p-2 text-slate-400 hover:bg-slate-800 hover:text-rose-400 disabled:opacity-40"
+            title="Stop PostgreSQL"
+            :disabled="installing"
+            @click="service('stop')"
+          >
+            <v-icon name="fa-stop" scale="0.85" />
+          </button>
+          <button
+            v-else
+            class="rounded-md p-2 text-slate-400 hover:bg-slate-800 hover:text-emerald-400 disabled:opacity-40"
+            title="Start PostgreSQL"
+            :disabled="installing"
+            @click="service('start')"
+          >
+            <v-icon name="fa-play" scale="0.85" />
+          </button>
+        </template>
         <button class="rounded-md p-2 text-slate-400 hover:bg-slate-800 hover:text-white" title="Refresh" @click="refresh">
           <v-icon name="fa-sync-alt" scale="0.85" :class="loading && 'animate-spin'" />
         </button>
@@ -838,6 +884,23 @@ const label = 'mb-1.5 block text-xs font-medium text-slate-400';
           >
             <v-icon :name="installing ? 'fa-spinner' : 'fa-cloud-download-alt'" :class="installing && 'animate-spin'" scale="0.8" />
             {{ installing ? 'Installing…' : 'Install PostgreSQL' }}
+          </button>
+        </div>
+
+        <div v-else-if="!context.reachable && !context.running" class="rounded-xl border border-rose-800/50 bg-rose-950/30 p-6 text-sm text-rose-200">
+          <p class="font-medium">PostgreSQL is installed but not running.</p>
+          <p class="mt-2 text-xs text-rose-300/80">
+            It stopped, or failed to start — the reason is usually in its log below. If this follows a rewind
+            on the Backups page, start it again from there or here once the cause is fixed.
+          </p>
+          <pre v-if="context.log" class="mt-3 max-h-64 overflow-auto rounded-lg bg-slate-950/60 px-3 py-2 font-mono text-[11px] whitespace-pre-wrap text-rose-100/70">{{ context.log }}</pre>
+          <button
+            class="mt-3 flex items-center gap-2 rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-500 disabled:opacity-60"
+            :disabled="installing"
+            @click="service('start')"
+          >
+            <v-icon :name="installing ? 'fa-spinner' : 'fa-play'" :class="installing && 'animate-spin'" scale="0.8" />
+            {{ installing ? 'Starting…' : 'Start PostgreSQL' }}
           </button>
         </div>
 

@@ -299,18 +299,97 @@ function startPostgres(): string {
   return `systemctl start postgresql $(systemctl list-units --all --plain --no-legend 'postgresql@*' | awk '{print $1}') 2>&1 && echo started`;
 }
 
+/** "X/Y" pg_lsn minus one byte, done here rather than in SQL (pg_lsn - numeric is PG14+). */
+function lsnMinusOne(lsn: string): string {
+  const [hi, lo] = lsn.split('/');
+  const n = ((BigInt(`0x${hi}`) << 32n) | BigInt(`0x${lo}`)) - 1n;
+  return `${(n >> 32n).toString(16).toUpperCase()}/${(n & 0xffffffffn).toString(16).toUpperCase()}`;
+}
+
 /** Forces out the WAL segment being written now and waits for it to be archived, so
- *  the moments just before a rewind are actually in the archive. */
+ *  the moments just before a rewind are actually in the archive.
+ *
+ *  It first commits one empty transaction (txid_current() assigns an xid, so its commit
+ *  is a real, timestamped commit record). A time target is only "reached" when replay
+ *  meets a commit made after it — on a quiet database there may be none, and PostgreSQL
+ *  then refuses to start ("recovery ended before configured recovery target was
+ *  reached"). This one guarantees every target before now has a commit after it, on
+ *  this timeline, for this rewind and any later one that comes back to it. It also
+ *  means pg_switch_wal() always has something to switch: on an idle segment it's a
+ *  no-op. */
 async function flushWal(session: SshSession): Promise<{ ok: boolean; output: string }> {
-  const segment = await runPgJson<string>(session, `SELECT to_json(pg_walfile_name(pg_switch_wal()));`).catch(() => '');
-  if (!segment) return { ok: false, output: 'Could not switch WAL (is PostgreSQL running?)' };
+  const switched = await runPgJson<string>(session, `SELECT txid_current(); SELECT to_json(pg_switch_wal()::text);`).catch(() => '');
+  if (!/^[0-9A-F]+\/[0-9A-F]+$/i.test(switched)) return { ok: false, output: 'Could not switch WAL (is PostgreSQL running?)' };
+  // pg_switch_wal() returns the end of its switch record, plus one. When there was
+  // nothing to switch it returns the current position instead — the first byte of a
+  // segment that isn't finished, so waiting on *that* name stalls until archive_timeout
+  // (or forever, if idle). The byte before it is always in a finished segment.
+  const segment = await runPgJson<string>(session, `SELECT to_json(pg_walfile_name('${lsnMinusOne(switched)}'));`).catch(() => '');
+  if (!/^[0-9A-F]{24}$/.test(segment)) return { ok: false, output: 'Could not work out which WAL segment was just closed' };
   for (let i = 0; i < 20; i++) {
-    const last = await runPgJson<string>(session, `SELECT to_json(last_archived_wal) FROM pg_stat_archiver;`).catch(() => '');
-    // Same-timeline segment names sort in order, so >= means "this one or a later one".
-    if (last && last >= segment) return { ok: true, output: `archived up to ${last}` };
+    const row = await runPgJson<{ last: string | null; done: boolean }>(
+      session,
+      `SELECT json_build_object(
+         'last', (SELECT last_archived_wal FROM pg_stat_archiver),
+         'done', (pg_stat_file('pg_wal/archive_status/${segment}.done', true)).size IS NOT NULL);`,
+    ).catch(() => null);
+    // .done is the archiver's own receipt for this exact file. The name check covers a
+    // checkpoint having already recycled it: same-timeline names sort in order, and
+    // last_archived_wal can also be a "…history" / "….partial" file, which doesn't count.
+    const last = row?.last ?? '';
+    const later = /^[0-9A-F]{24}$/.test(last) && last.slice(0, 8) === segment.slice(0, 8) && last >= segment;
+    if (row?.done || later) return { ok: true, output: `archived ${segment}` };
     await new Promise((r) => setTimeout(r, 1500));
   }
   return { ok: false, output: `WAL segment ${segment} was not archived within 30 s — check archive_command and the Backups page's archiving status` };
+}
+
+/** Which timeline was live at `targetMs` — the one a rewind to that moment must follow.
+ *
+ *  Every rewind forks a new timeline (2, 3, …), and PostgreSQL's default is to replay
+ *  along the *newest* one. After one rewind, the newest timeline is the rewound one,
+ *  which jumps straight from the old target to "now" — so a second rewind to a time in
+ *  between either lands on the wrong data or, when that branch has no commit after the
+ *  target, refuses to start at all ("recovery ended before configured recovery target
+ *  was reached"). A timeline's .history file is archived the moment it is created, so
+ *  the live timeline at T is the newest one whose history file is no newer than T.
+ *  'current' (the backup's own timeline) when none was created before T yet; null when
+ *  the archive can't be listed, leaving pgBackRest's default. */
+async function timelineAt(session: SshSession, stanza: string, targetMs: number, repoArg: string): Promise<string | null> {
+  const info = await execAsPostgres(session, `pgbackrest --stanza=${stanza}${repoArg} info --output=json 2>/dev/null`);
+  let archiveId = '';
+  try {
+    const archives = (JSON.parse(info.stdout)[0]?.archive ?? []) as { id?: string }[];
+    archiveId = String(archives.at(-1)?.id ?? '');
+  } catch {
+    return null;
+  }
+  if (!/^[0-9]+-[0-9]+$/.test(archiveId)) return null;
+  const ls = await execAsPostgres(
+    session,
+    `pgbackrest --stanza=${stanza}${repoArg} repo-ls --output=json --filter=${shellQuote('\\.history$')} archive/${stanza}/${archiveId} 2>/dev/null`,
+  );
+  let files: Record<string, { time?: number }>;
+  try {
+    files = JSON.parse(ls.stdout);
+  } catch {
+    return null;
+  }
+  let best = 0;
+  for (const [name, f] of Object.entries(files)) {
+    const m = /^([0-9A-F]{8})\.history$/.exec(name);
+    if (m && typeof f.time === 'number' && f.time * 1000 <= targetMs) best = Math.max(best, parseInt(m[1], 16));
+  }
+  return best ? String(best) : 'current';
+}
+
+/** The tail of PostgreSQL's own log — `systemctl start` only says "failed", the reason is here. */
+async function postgresLogTail(session: SshSession): Promise<string> {
+  const out = await run(
+    session,
+    `{ journalctl -u 'postgresql*' -n 40 --no-pager -o cat 2>/dev/null; tail -n 40 /var/log/postgresql/postgresql-*.log 2>/dev/null; } | tail -n 60`,
+  ).catch(() => null);
+  return out?.stdout.trim() ?? '';
 }
 
 // ------------------------------------------------------------------- routes
@@ -688,6 +767,11 @@ export function registerPgBackRest(app: Express, requireSession: import('express
         `Too far back: the oldest backup finished ${new Date(earliest).toISOString().replace('T', ' ').slice(0, 19)} UTC, and a rewind can't go before it`,
       );
 
+      // Which branch of history to replay along — see timelineAt. Worked out while the
+      // database is still up, so a failure here costs nothing.
+      const timeline = await timelineAt(session, stanza, targetMs, repoArg);
+      const timelineArg = timeline ? ` --target-timeline=${timeline}` : '';
+
       // 1. Make sure the WAL right up to now is in the archive before stopping.
       const flushed = await flushWal(session);
       log.push({ title: 'Archive the latest WAL', ok: flushed.ok, output: flushed.output });
@@ -708,9 +792,13 @@ export function registerPgBackRest(app: Express, requireSession: import('express
       //    pgBackRest's default is "pause", which leaves the database read-only.
       const restore = await execAsPostgres(
         session,
-        `pgbackrest --stanza=${stanza} --type=time --target=${shellQuote(targetTime)} --target-action=promote --delta${repoArg} restore 2>&1`,
+        `pgbackrest --stanza=${stanza} --type=time --target=${shellQuote(targetTime)}${timelineArg} --target-action=promote --delta${repoArg} restore 2>&1`,
       );
-      const restoreStep = { title: `Restore and replay WAL up to ${targetTime}`, ok: restore.code === 0, output: (restore.stdout + restore.stderr).trim() };
+      const restoreStep = {
+        title: `Restore and replay WAL up to ${targetTime}${timeline && timeline !== 'current' ? ` (timeline ${timeline})` : ''}`,
+        ok: restore.code === 0,
+        output: (restore.stdout + restore.stderr).trim(),
+      };
       log.push(restoreStep);
       if (restore.code !== 0) {
         // [075] "unable to find backup set" is decided before any file is touched, so the
@@ -728,10 +816,41 @@ export function registerPgBackRest(app: Express, requireSession: import('express
       }
 
       // 4. Start, and wait for recovery to finish.
-      const start = await runSteps(session, [{ title: 'Start PostgreSQL', command: startPostgres() }]);
-      log.push(...start.log);
+      let start = await runSteps(session, [{ title: 'Start PostgreSQL', command: startPostgres() }]);
+      if (start.ok) log.push(...start.log);
+      else {
+        const pgLog = await postgresLogTail(session);
+        // A time target only "arrives" at the first commit after it. When nothing was
+        // committed between the target and the end of that timeline (a timeline left
+        // by a rewind made before flushWal committed its marker transaction), PostgreSQL
+        // refuses — yet the end of that timeline IS the state at the target. Replay to
+        // its end instead; that's an expected detour, not a failure to show in red.
+        if (/recovery ended before configured recovery target was reached/.test(pgLog)) {
+          log.push({
+            title: `No change was made after ${targetTime} on this timeline, so its last state is the one you asked for`,
+            ok: true,
+            output: pgLog.split('\n').filter((l) => /last completed transaction|recovery target/.test(l)).join('\n'),
+          });
+          const replay = await execAsPostgres(
+            session,
+            `pgbackrest --stanza=${stanza} --type=default --target-timeline=${timeline ?? 'current'} --delta${repoArg} restore 2>&1`,
+          );
+          log.push({
+            title: 'Replay that timeline to its end instead',
+            ok: replay.code === 0,
+            output: (replay.stdout + replay.stderr).trim(),
+          });
+          if (replay.code === 0) {
+            start = await runSteps(session, [{ title: 'Start PostgreSQL', command: `systemctl reset-failed 'postgresql@*' 2>/dev/null; ${startPostgres()}` }]);
+            log.push(...start.log);
+            if (!start.ok) log.push({ title: 'Why PostgreSQL did not start (its log)', ok: false, output: (await postgresLogTail(session)) || 'no log output found' });
+          }
+        } else {
+          log.push(...start.log, { title: 'Why PostgreSQL did not start (its log)', ok: false, output: pgLog || 'no log output found' });
+        }
+      }
       if (!start.ok) {
-        res.status(500).json({ error: 'Start PostgreSQL failed', log });
+        res.status(500).json({ error: 'Start PostgreSQL failed — PostgreSQL is left stopped; see its log above', log });
         return;
       }
       let state = '';
