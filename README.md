@@ -167,6 +167,17 @@ Both run plain shell commands over the SSH session (`docker`, `docker compose`, 
 - **Every deploy checks the app stays up.** `up -d` returns as soon as a container exists; an
   app missing its settings then exits and restarts forever. Both deploy flows wait ~12s, and
   if a container isn't steadily running they show its exit code and last log lines.
+- **Drag and drop anything onto the Docker page** — several image archives at once, or a whole
+  folder of them. Each is uploaded and loaded, matched to the stack service that runs it, and
+  one **Update** recreates those services on the new build with the same settings (each old
+  build kept as `<repo>:rollback`, with **Roll back** per service on the stack). A dropped
+  `.yml` whose `name:` matches an existing stack updates that stack's file and keeps every value
+  already set (old file saved as `.before-<date>`), listing only the new settings to fill in.
+  `build:` sections whose source isn't on the server are removed automatically. In a stack's
+  panel, **New build** on a running service does the same for one image.
+- **Change** on an `x-secrets` entry changes a password everywhere it's used: the compose file,
+  the PostgreSQL role (ALTER ROLE), and the containers that read it (Redis and MinIO restart
+  with it). JWT signing keys shorter than 65 bytes are refused (HMAC-SHA512 needs > 512 bits).
 - **Stacks** (Docker → Stacks tab) are whole compose projects: API, front end, Redis, MinIO in
   one file. Bring the file by uploading it, pasting it, dropping a `.yml` on the Docker page,
   or from a template. The panel then shows:

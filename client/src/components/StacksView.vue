@@ -92,7 +92,10 @@ async function create() {
   submitting.value = true;
   try {
     const res = await api.stackCreate({ dir: draft.value.dir, content: draft.value.content, overwrite: draft.value.overwrite });
-    notify(`Created ${res.files[0]}`);
+    notify(
+      `Created ${res.files[0]}` +
+        (res.stripped?.length ? ` — removed build: from ${res.stripped.join(', ')} (no source on this server; their images come from .tar files)` : ''),
+    );
     creating.value = false;
     await load();
     open.value = { dir: res.dir, files: res.files, project: '' };
@@ -109,12 +112,66 @@ function stateSummary(s: StackSummary) {
   return `${s.running}/${s.services.length} running`;
 }
 
+// ------------------------------------------- a dropped file for an EXISTING stack
+
+const merging = ref<{
+  stack: StackSummary;
+  name: string;
+  content: string;
+  report: api.StackMergeReport | null;
+  busy: boolean;
+} | null>(null);
+
+/** A dropped/uploaded compose file whose `name:` (or /opt/<name>) matches a stack already on
+ *  the server is offered as an UPDATE of that stack — the new layout with today's values —
+ *  rather than a second stack that would fight the first one for its ports. */
+async function routeIncoming(inc: { name: string; content: string }) {
+  if (!list.value.length) await load();
+  const own = /^name:\s*["']?([a-z0-9][a-z0-9_-]*)/m.exec(inc.content)?.[1];
+  const base = slug(inc.name.replace(/\.(ya?ml)$/i, '').replace(/^docker-compose\.?|^compose\.?/i, ''));
+  const stack = list.value.find((s) => (own && (s.project === own || s.dir === `/opt/${own}`)) || (!own && base && s.dir === `/opt/${base}`));
+  if (!stack) {
+    startNew(inc);
+    return;
+  }
+  merging.value = { stack, name: inc.name, content: inc.content, report: null, busy: false };
+  try {
+    merging.value.report = await api.stackMerge({ dir: stack.dir, files: stack.files, project: stack.project }, inc.content, true);
+  } catch (err) {
+    fail(err);
+    merging.value = null;
+  }
+}
+
+async function applyMerge() {
+  const m = merging.value;
+  if (!m) return;
+  m.busy = true;
+  try {
+    const ref: StackRef = { dir: m.stack.dir, files: m.stack.files, project: m.stack.project };
+    await api.stackMerge(ref, m.content);
+    notify(`${m.stack.project}: compose file updated, your values kept (old file saved beside it)`);
+    merging.value = null;
+    await load();
+    open.value = ref;
+  } catch (err) {
+    fail(err);
+    m.busy = false;
+  }
+}
+
+function mergeAsNew() {
+  const m = merging.value;
+  merging.value = null;
+  if (m) startNew({ name: m.name, content: m.content });
+}
+
 // The Docker page hands over a dropped .yml, or a project to open, through props.
 watch(
   () => props.incoming,
   (inc) => {
     if (inc) {
-      startNew(inc);
+      routeIncoming(inc);
       emit('consumed');
     }
   },
@@ -188,6 +245,53 @@ const label = 'mb-1.5 block text-xs font-medium text-slate-400';
         </p>
         <p v-if="s.error" class="mt-2 line-clamp-2 font-mono text-[11px] text-red-400">{{ s.error }}</p>
       </button>
+    </div>
+
+    <!-- Update an existing stack from a dropped file -->
+    <div v-if="merging" data-modal class="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/85 p-4 backdrop-blur-sm">
+      <div class="flex max-h-[90vh] w-full max-w-xl flex-col rounded-2xl border border-slate-700 bg-slate-900 shadow-2xl">
+        <div class="border-b border-slate-800 px-6 py-4">
+          <h2 class="text-base font-semibold text-white">Update {{ merging.stack.project }}?</h2>
+          <p class="mt-0.5 text-xs text-slate-400">
+            <span class="font-mono">{{ merging.name }}</span> is for the stack already at
+            <span class="font-mono">{{ merging.stack.files[0] }}</span>. Use its new layout and keep every value you set there?
+          </p>
+        </div>
+        <div class="min-h-0 flex-1 space-y-3 overflow-auto px-6 py-4 text-xs">
+          <div v-if="!merging.report" class="py-6 text-center"><v-icon name="fa-spinner" class="animate-spin text-sky-400" /></div>
+          <template v-else>
+            <p class="text-emerald-300"><v-icon name="fa-check-circle" scale="0.65" /> {{ merging.report.kept.length }} value(s) carried over from the current file.</p>
+            <div v-if="merging.report.needsValue.length" class="rounded-lg border border-amber-800/50 bg-amber-950/30 p-3 text-amber-200">
+              <p class="font-medium">Still need a value ({{ merging.report.needsValue.length }}) — fill them in on the stack's Settings after this:</p>
+              <p class="mt-1 font-mono text-[11px] text-amber-100/80">{{ merging.report.needsValue.join(' · ') }}</p>
+            </div>
+            <div v-if="merging.report.added.length">
+              <p class="font-medium text-slate-300">New in this file</p>
+              <p class="font-mono text-[11px] text-slate-400">{{ merging.report.added.join(' · ') }}</p>
+            </div>
+            <div v-if="merging.report.dropped.length">
+              <p class="font-medium text-slate-300">No longer in the file (their values go)</p>
+              <p class="font-mono text-[11px] text-slate-400">{{ merging.report.dropped.join(' · ') }}</p>
+            </div>
+            <p v-if="merging.report.stripped.length" class="text-slate-400">
+              <code>build:</code> removed from {{ merging.report.stripped.join(', ') }} — no source on this server; their images come from .tar files.
+            </p>
+            <p class="text-slate-500">The current file is saved beside it as <span class="font-mono">…yml.before-&lt;date&gt;</span>. Nothing is restarted — Deploy when ready.</p>
+          </template>
+        </div>
+        <div class="flex items-center gap-2 border-t border-slate-800 px-6 py-3">
+          <button class="text-xs text-slate-400 hover:text-white" :disabled="merging.busy" @click="mergeAsNew">Create a separate stack instead</button>
+          <div class="flex-1" />
+          <button class="rounded-lg px-3 py-1.5 text-sm text-slate-400 hover:bg-slate-800" :disabled="merging.busy" @click="merging = null">Cancel</button>
+          <button
+            :disabled="!merging.report || merging.busy"
+            class="rounded-lg bg-sky-600 px-4 py-1.5 text-sm font-semibold text-white hover:bg-sky-500 disabled:opacity-40"
+            @click="applyMerge"
+          >
+            {{ merging.busy ? 'Updating…' : 'Update, keep my values' }}
+          </button>
+        </div>
+      </div>
     </div>
 
     <!-- New stack -->

@@ -601,11 +601,34 @@ export function stackChangeSecret(
   return request('/stacks/secret', { method: 'POST', body: json({ ...ref, ...setting, value, dryRun }) });
 }
 
+export interface StackMergeReport {
+  kept: string[];
+  added: string[];
+  needsValue: string[];
+  dropped: string[];
+  /** Services whose `build:` was removed because their source is not on the server. */
+  stripped: string[];
+}
+
+/** A newer compose file for an existing stack, keeping its current values. `dryRun` = report only. */
+export function stackMerge(ref: StackRef, content: string, dryRun = false): Promise<StackMergeReport & { ok?: boolean }> {
+  return request('/stacks/merge', { method: 'POST', body: json({ ...ref, content, dryRun }) });
+}
+
+/** Recreates services on images just loaded, keeping each previous build as :rollback. */
+export function stackUpdateImages(ref: StackRef, services: string[]): Promise<{ ok: boolean; log: StepResult[]; crashed: StackCrash[] }> {
+  return request('/stacks/update-images', { method: 'POST', body: json({ ...ref, services }) });
+}
+
+export function stackRollback(ref: StackRef, service: string): Promise<{ ok: boolean; log: StepResult[]; crashed: StackCrash[] }> {
+  return request('/stacks/rollback', { method: 'POST', body: json({ ...ref, service }) });
+}
+
 export function stackSaveRaw(ref: StackRef, content: string): Promise<void> {
   return request('/stacks/raw', { method: 'POST', body: json({ ...ref, content }) });
 }
 
-export function stackCreate(spec: { dir: string; content: string; overwrite?: boolean }): Promise<{ dir: string; files: string[] }> {
+export function stackCreate(spec: { dir: string; content: string; overwrite?: boolean }): Promise<{ dir: string; files: string[]; stripped: string[] }> {
   return request('/stacks', { method: 'POST', body: json(spec) });
 }
 

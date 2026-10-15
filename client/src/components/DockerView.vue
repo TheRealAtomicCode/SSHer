@@ -3,10 +3,9 @@ import { computed, onMounted, ref, watch } from 'vue';
 import * as api from '../api';
 import { ApiError } from '../api';
 import { fail, notify } from '../toast';
-import { isCancelled, trackUpload } from '../backgroundTasks';
-import { newTransferId } from '../transferProgress';
 import type { ComposeInfo, ComposeOp, Container, DockerImage, Session, StackRef, StepResult } from '../types';
 import DeployWizard from './DeployWizard.vue';
+import DropDeploy from './DropDeploy.vue';
 import ContainerConfig from './ContainerConfig.vue';
 import ContainerLinks from './ContainerLinks.vue';
 import ContainerNetwork from './ContainerNetwork.vue';
@@ -317,54 +316,68 @@ function onDragLeave() {
   if (!dragDepth) dropping.value = false;
 }
 
+/** Image archives being loaded by the drop flow (DropDeploy). */
+const dropQueue = ref<File[] | null>(null);
+
 async function onDrop(e: DragEvent) {
   dragDepth = 0;
   dropping.value = false;
-  const file = e.dataTransfer?.files[0];
-  if (file) await loadFile(file);
+  if (e.dataTransfer) await handleFiles(await filesFromDrop(e.dataTransfer));
 }
 
-/** A compose file starts a new stack; anything else is treated as an image archive. */
-async function loadFile(file: File) {
-  if (/\.(ya?ml)$/i.test(file.name)) {
-    incomingYml.value = { name: file.name, content: await file.text() };
-    tab.value = 'stacks';
+/** Every file dropped — including those inside dropped folders (e.g. a whole
+ *  LPTIC_HR_Images/2026-10-15 folder), a few levels deep. */
+async function filesFromDrop(dt: DataTransfer): Promise<File[]> {
+  const entries = [...dt.items].map((i) => i.webkitGetAsEntry?.()).filter((e): e is FileSystemEntry => Boolean(e));
+  if (!entries.length) return [...dt.files];
+  const out: File[] = [];
+  const walk = async (entry: FileSystemEntry, depth: number): Promise<void> => {
+    if (entry.isFile) {
+      out.push(await new Promise<File>((resolve, reject) => (entry as FileSystemFileEntry).file(resolve, reject)));
+    } else if (entry.isDirectory && depth < 3) {
+      const reader = (entry as FileSystemDirectoryEntry).createReader();
+      // readEntries hands back the folder in batches until it returns an empty one.
+      for (;;) {
+        const batch = await new Promise<FileSystemEntry[]>((resolve, reject) => reader.readEntries(resolve, reject));
+        if (!batch.length) break;
+        for (const child of batch) await walk(child, depth + 1);
+      }
+    }
+  };
+  for (const entry of entries) await walk(entry, 0);
+  return out;
+}
+
+/** Compose files go to Stacks (new, or an update of the stack with the same name); image
+ *  archives are loaded together and matched to what uses them; anything else is skipped. */
+async function handleFiles(files: File[]) {
+  const ymls = files.filter((f) => /\.(ya?ml)$/i.test(f.name));
+  const images = files.filter((f) => isTar(f.name));
+  const skipped = files.filter((f) => !ymls.includes(f) && !images.includes(f));
+  if (skipped.length && !ymls.length && !images.length) {
+    fail(new Error(`Nothing to deploy in that: drop .tar / .tar.gz image archives (docker save) or a compose .yml.`));
     return;
   }
-  await loadImageFile(file);
+  if (skipped.length) notify(`Skipped ${skipped.length} other file${skipped.length === 1 ? '' : 's'} (${skipped.slice(0, 3).map((f) => f.name).join(', ')}${skipped.length > 3 ? '…' : ''})`);
+  if (ymls.length > 1) notify(`Several compose files dropped — using ${ymls[0].name}`);
+  if (images.length) dropQueue.value = images;
+  if (ymls.length) {
+    incomingYml.value = { name: ymls[0].name, content: await ymls[0].text() };
+    if (!images.length) tab.value = 'stacks';
+  }
 }
 
 async function onPick(e: Event) {
   const input = e.target as HTMLInputElement;
-  const file = input.files?.[0];
+  const files = [...(input.files ?? [])];
   input.value = '';
-  if (file) await loadFile(file);
+  if (files.length) await handleFiles(files);
 }
 
-async function loadImageFile(file: File) {
-  if (!isTar(file.name)) {
-    fail(new Error(`${file.name} is not an image archive. Drop the .tar (or .tar.gz) made by: docker save -o app.tar your-image:tag`));
-    return;
-  }
-  const transferId = newTransferId();
-  // Progress (and the cancel button) live in the background-tasks tray, which also
-  // picks the job up again if the page is reloaded mid-way.
-  const task = trackUpload(transferId, file.name, 'docker load');
-  try {
-    const res = await api.dockerLoad(file, task.progress, transferId, task.signal);
-    task.settle();
-    if (!res.images.length) throw new Error(`docker load did not report an image:\n${res.output}`);
-    notify(`Loaded ${res.images.join(', ')}`);
-    await refresh();
-    // A new build of an image that is already running is an update, not a new app.
-    const running = containers.value.filter((c) => c.compose && res.images.includes(c.image));
-    if (running.length) updateChoice.value = { image: res.images[0], containers: running };
-    else wizard.value = { image: res.images[0], source: 'loaded' };
-  } catch (err) {
-    task.settle(err);
-    if (isCancelled(err)) notify(`Cancelled ${file.name}`);
-    else fail(err);
-  }
+function onDropDeployOpenStack(ref: StackRef) {
+  dropQueue.value = null;
+  stackToOpen.value = ref;
+  tab.value = 'stacks';
 }
 
 // ------------------------------------------------------------------ misc
@@ -466,14 +479,15 @@ const btn = 'rounded-md p-1.5 text-slate-400 transition hover:bg-slate-800 hover
               <v-icon name="fa-file-upload" class="text-sky-300" scale="1.1" />
             </div>
             <div class="min-w-0 flex-1">
-              <p class="text-sm font-medium text-white">Drag & drop a Docker image (.tar) or a compose file (.yml) here</p>
+              <p class="text-sm font-medium text-white">Drop images, a compose file, or a whole folder of them here</p>
               <p class="text-xs text-slate-500">
-                A .tar from <code class="text-slate-400">docker save -o app.tar my-app:latest</code> — it's uploaded,
-                loaded with docker load, then the wizard asks the port, domain and storage.
+                Image archives (<code class="text-slate-400">.tar</code> / <code class="text-slate-400">.tar.gz</code> from docker save) are
+                loaded and matched to the stack that runs them — one click updates those services. A
+                <code class="text-slate-400">.yml</code> starts a new stack, or updates the one with the same name and keeps its values.
               </p>
             </div>
-            <span class="shrink-0 rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-300">Choose file</span>
-            <input type="file" accept=".tar,.gz,.tgz,.xz,.zst,.yml,.yaml" class="hidden" @change="onPick" />
+            <span class="shrink-0 rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-300">Choose files</span>
+            <input type="file" multiple accept=".tar,.gz,.tgz,.xz,.zst,.yml,.yaml" class="hidden" @change="onPick" />
           </label>
 
           <!-- Containers -->
@@ -843,8 +857,8 @@ const btn = 'rounded-md p-1.5 text-slate-400 transition hover:bg-slate-800 hover
     >
       <div class="rounded-2xl border-2 border-dashed border-sky-400 bg-slate-900/90 px-10 py-8 text-center">
         <v-icon name="fa-docker" scale="3" class="text-sky-400" />
-        <p class="mt-3 text-base font-semibold text-white">Drop the image to deploy it</p>
-        <p class="mt-1 text-xs text-slate-400">.tar / .tar.gz from docker save</p>
+        <p class="mt-3 text-base font-semibold text-white">Drop to deploy</p>
+        <p class="mt-1 text-xs text-slate-400">image archives, a compose .yml, or a folder of them</p>
       </div>
     </div>
 
@@ -883,6 +897,15 @@ const btn = 'rounded-md p-1.5 text-slate-400 transition hover:bg-slate-800 hover
         </div>
       </div>
     </div>
+
+    <DropDeploy
+      v-if="dropQueue"
+      :files="dropQueue"
+      @close="dropQueue = null; refresh()"
+      @changed="refresh"
+      @deploy-new="(img) => { dropQueue = null; wizard = { image: img, source: 'loaded' }; }"
+      @open-stack="onDropDeployOpenStack"
+    />
 
     <DeployWizard
       v-if="wizard"

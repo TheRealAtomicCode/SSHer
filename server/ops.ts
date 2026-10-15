@@ -145,14 +145,14 @@ export function badRequestRoute(
 /** A YAML double-quoted scalar. JSON strings are valid YAML; `$` is doubled for compose. */
 const yq = (value: string) => JSON.stringify(value.replace(/\$/g, '$$$$'));
 
-const stamp = () => {
+export const stamp = () => {
   const d = new Date();
   const p = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
 };
 
 /** `ghcr.io/x/app:prod` -> `ghcr.io/x/app`. A registry port (`host:5000/app`) is not a tag. */
-function repoOf(image: string): string {
+export function repoOf(image: string): string {
   const colon = image.lastIndexOf(':');
   return colon > image.lastIndexOf('/') ? image.slice(0, colon) : image;
 }

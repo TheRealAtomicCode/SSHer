@@ -19,6 +19,8 @@ import {
   need,
   OVERRIDE_FILE,
   RE,
+  repoOf,
+  stamp,
   run,
   runOrThrow,
   str,
@@ -374,6 +376,93 @@ export async function settleCheck(session: SshSession, base: string, services: s
   return bad;
 }
 
+// ------------------------------------------------------------ build: sections
+
+/**
+ * Removes each service's `build:` block whose source is not on this server — the usual case:
+ * a compose file written for a developer machine (build from source) uploaded to a server that
+ * gets its images as .tar files. Left in, compose would try to build, or fail validating a
+ * context that does not exist. A build whose context and Dockerfile ARE here is kept.
+ */
+export async function stripMissingBuilds(session: SshSession, dir: string, text: string): Promise<{ text: string; stripped: string[] }> {
+  const lines = text.split('\n');
+  const out: string[] = [];
+  const stripped: string[] = [];
+  let service = '';
+  let inServices = false;
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i].replace(/\r$/, '');
+    const indent = indentOf(raw);
+    if (raw.trim() && indent === 0) inServices = /^services:\s*$/.test(raw);
+    if (inServices && indent === 2 && /^\s{2}[^\s#][^:]*:\s*$/.test(raw)) service = raw.trim().slice(0, -1);
+
+    const build = inServices && indent === 4 ? /^\s{4}build:\s*(.*)$/.exec(raw) : null;
+    if (!build) {
+      out.push(lines[i]);
+      continue;
+    }
+    // `build: ./path` (short form), or a block with context: / dockerfile:.
+    const block: string[] = [];
+    let j = i + 1;
+    while (j < lines.length && (!lines[j].trim() || indentOf(lines[j].replace(/\r$/, '')) > 4)) block.push(lines[j++]);
+    const field = (name: string) => {
+      const re = new RegExp(`^\\s+${name}:\\s*(.+?)\\s*$`);
+      const hit = block.map((l) => re.exec(l.replace(/\r$/, ''))?.[1]).find(Boolean);
+      return hit ? unquote(hit) : '';
+    };
+    const context = unquote(build[1].trim()) || field('context') || '.';
+    const dockerfile = field('dockerfile') || 'Dockerfile';
+    const contextPath = context.startsWith('/') ? context : posix.join(dir, context);
+    const here = RE.absPath.test(contextPath)
+      ? await run(session, `[ -d ${shellQuote(contextPath)} ] && [ -f ${shellQuote(posix.join(contextPath, dockerfile))} ] && echo yes || true`, true)
+      : null;
+    if (here?.stdout.trim() === 'yes') {
+      out.push(lines[i], ...block);
+    } else {
+      stripped.push(service);
+      // Keep blank lines that separated services.
+      while (block.length && !block[block.length - 1].trim()) out.push(block.pop()!);
+    }
+    i = j - 1;
+  }
+  return { text: out.join('\n'), stripped };
+}
+
+// --------------------------------------------------------------- merging a new file
+
+/**
+ * A new version of a stack's compose file (a newer template, say) with the CURRENT file's
+ * values carried into it: every setting that exists in both — same block, same key — keeps the
+ * value it has now, unless that value is still a placeholder. What is left is reported: settings
+ * only the new file has (and still need a value), and ones that are going away.
+ */
+export function mergeIntoNew(current: string, next: string) {
+  const old = new Map(parseSettings(current).map((s) => [`${s.block}\u0000${s.key}`, s]));
+  const incoming = parseSettings(next);
+  const edits: { line: number; key: string; value: string }[] = [];
+  const kept: string[] = [];
+  const added: string[] = [];
+  for (const s of incoming) {
+    const before = old.get(`${s.block}\u0000${s.key}`);
+    if (!before) {
+      added.push(`${s.block}: ${s.key}`);
+      continue;
+    }
+    old.delete(`${s.block}\u0000${s.key}`);
+    if (before.placeholder || before.value === s.value) continue;
+    edits.push({ line: s.line, key: s.key, value: before.value });
+    kept.push(`${s.block}: ${s.key}`);
+  }
+  const merged = edits.length ? applySettings(next, edits) : next;
+  return {
+    merged,
+    kept,
+    added,
+    needsValue: parseSettings(merged).filter((s) => s.placeholder).map((s) => `${s.block}: ${s.key}`),
+    dropped: [...old.values()].map((s) => `${s.block}: ${s.key}`),
+  };
+}
+
 // ------------------------------------------------------------- changing a secret
 
 /** `name: &anchor "value"` declarations anywhere in the file, anchor -> value. */
@@ -643,8 +732,9 @@ export function registerStacks(app: Express, requireSession: import('express').R
         const exists = await run(session, `[ -e ${shellQuote(file)} ] && echo yes || true`);
         need(exists.stdout.trim() !== 'yes', `${file} already exists — tick "replace" to overwrite it`);
       }
+      const { text, stripped } = await stripMissingBuilds(session, dir, content);
       const staged = posix.join(dir, `.${fileName}.ssher-new`);
-      await writeRemote(session, staged, content);
+      await writeRemote(session, staged, text);
       const check = await run(
         session,
         `cd ${shellQuote(dir)} && docker compose --project-directory ${shellQuote(dir)} -f ${shellQuote(staged)} config --quiet 2>&1`,
@@ -654,7 +744,129 @@ export function registerStacks(app: Express, requireSession: import('express').R
         throw new Error(`That isn't a valid compose file:\n${(check.stdout + check.stderr).trim()}`);
       }
       await runOrThrow(session, `chmod 600 ${shellQuote(staged)} && mv -f ${shellQuote(staged)} ${shellQuote(file)}`);
-      res.json({ ok: true, dir, files: [file] });
+      res.json({ ok: true, dir, files: [file], stripped });
+    }),
+  );
+
+  /**
+   * A newer version of an existing stack's compose file — dropped or pasted — with the
+   * current values carried over (see mergeIntoNew), `build:` sections without source removed.
+   * `dryRun` reports what would be kept, what is new and still needs a value, and what goes.
+   * Applying validates a staged copy first and keeps the file's owner and mode.
+   */
+  app.post(
+    '/api/stacks/merge',
+    requireSession,
+    route(async (req, res) => {
+      const session = req.session!;
+      const ref = parseRef(req.body ?? {});
+      const content = String(req.body?.content ?? '');
+      need(content.trim(), 'The compose file is empty');
+      need(content.length < 512 * 1024, 'That compose file is too large');
+      const file = ref.files[0];
+      const current = await readRoot(session, file);
+      const { text, stripped } = await stripMissingBuilds(session, ref.dir, content);
+      const result = mergeIntoNew(current, text);
+      if (req.body?.dryRun) {
+        res.json({ ...result, merged: undefined, stripped });
+        return;
+      }
+      const staged = posix.join(posix.dirname(file), `.${posix.basename(file)}.ssher-new`);
+      await writeRemote(session, staged, result.merged);
+      const check = await run(session, `${composeBase({ ...ref, files: [staged, ...ref.files.slice(1)] })} config --quiet 2>&1`);
+      if (check.code !== 0) {
+        await run(session, `rm -f ${shellQuote(staged)}`);
+        throw new BadRequest(`docker compose rejected the merged file — nothing was saved:\n${(check.stdout + check.stderr).trim()}`);
+      }
+      // Keep a copy of what it replaced, beside it.
+      await runOrThrow(
+        session,
+        `cp -a ${shellQuote(file)} ${shellQuote(`${file}.before-${stamp()}`)} && cat ${shellQuote(staged)} > ${shellQuote(file)} && rm -f ${shellQuote(staged)}`,
+      );
+      res.json({ ...result, merged: undefined, stripped, ok: true });
+    }),
+  );
+
+  /**
+   * New builds of some services' images were just `docker load`ed: keep each running build
+   * as <repo>:rollback (and a dated copy), recreate those services on the new image, and
+   * check they stay up. The drag-and-drop finish for a stack.
+   */
+  app.post(
+    '/api/stacks/update-images',
+    requireSession,
+    route(async (req, res) => {
+      const session = req.session!;
+      const ref = parseRef(req.body ?? {});
+      const base = composeBase(ref);
+      const services = (Array.isArray(req.body?.services) ? req.body.services : []).map(String);
+      need(services.length, 'no services given');
+      for (const s of services) need(RE.id.test(s), `invalid service ${s}`);
+      const config = JSON.parse(await runOrThrow(session, `${base} config --format json 2>/dev/null`)) as {
+        services: Record<string, { image?: string }>;
+      };
+      const log: { title: string; ok: boolean; output: string }[] = [];
+      const when = stamp();
+      for (const s of services) {
+        const image = config.services[s]?.image;
+        need(image && RE.image.test(image), `${s} has no image in the compose file`);
+        const id = (await run(session, `${base} ps -a -q ${shellQuote(s)} 2>/dev/null`, true)).stdout.trim().split('\n')[0];
+        if (!id) {
+          log.push({ title: `${s}: not created yet`, ok: true, output: 'Nothing to keep — it starts on the new image.' });
+          continue;
+        }
+        const prev = (await run(session, `docker inspect -f '{{.Image}}' ${shellQuote(id)}`, true)).stdout.trim();
+        const now = (await run(session, `docker image inspect -f '{{.Id}}' ${shellQuote(image)} 2>/dev/null`, true)).stdout.trim();
+        if (prev && prev === now) {
+          log.push({ title: `${s}: already on this build`, ok: true, output: image });
+          continue;
+        }
+        const repo = repoOf(image);
+        const tagged = await run(session, `docker tag ${prev} ${shellQuote(`${repo}:rollback`)} && docker tag ${prev} ${shellQuote(`${repo}:rollback-${when}`)} 2>&1`);
+        log.push({ title: `${s}: keep the running build as ${repo}:rollback-${when}`, ok: tagged.code === 0, output: (tagged.stdout + tagged.stderr).trim() });
+      }
+      const up = await run(session, `${base} up -d --no-build --force-recreate ${services.map(shellQuote).join(' ')} 2>&1`);
+      log.push({ title: `Recreate ${services.join(', ')} on the new image`, ok: up.code === 0, output: (up.stdout + up.stderr).trim() });
+      if (up.code !== 0) {
+        res.status(500).json({ error: 'docker compose up failed', log });
+        return;
+      }
+      const crashed = await settleCheck(session, base, services);
+      log.push({
+        title: 'Still running afterwards',
+        ok: !crashed.length,
+        output: crashed.length ? crashed.map((c) => `${c.service}: ${c.state}, exit ${c.exitCode}`).join('\n') : 'every container is up',
+      });
+      res.json({ ok: !crashed.length, log, crashed });
+    }),
+  );
+
+  /** Puts a service back on the build that ran before its last update (<repo>:rollback). */
+  app.post(
+    '/api/stacks/rollback',
+    requireSession,
+    route(async (req, res) => {
+      const session = req.session!;
+      const ref = parseRef(req.body ?? {});
+      const base = composeBase(ref);
+      const service = str(req.body?.service);
+      need(RE.id.test(service), 'invalid service');
+      const config = JSON.parse(await runOrThrow(session, `${base} config --format json 2>/dev/null`)) as {
+        services: Record<string, { image?: string }>;
+      };
+      const image = config.services[service]?.image;
+      need(image && RE.image.test(image), `${service} has no image in the compose file`);
+      const rollback = `${repoOf(image)}:rollback`;
+      const has = await run(session, `docker image inspect ${shellQuote(rollback)} >/dev/null 2>&1 && echo yes || true`, true);
+      need(has.stdout.trim() === 'yes', `There is no ${rollback} — nothing has been updated through SSHer yet.`);
+      const log: { title: string; ok: boolean; output: string }[] = [];
+      const tag = await run(session, `docker tag ${shellQuote(rollback)} ${shellQuote(image)} 2>&1`);
+      log.push({ title: `Point ${image} back at ${rollback}`, ok: tag.code === 0, output: (tag.stdout + tag.stderr).trim() });
+      const up = await run(session, `${base} up -d --no-build --force-recreate ${shellQuote(service)} 2>&1`);
+      log.push({ title: `Recreate ${service}`, ok: up.code === 0, output: (up.stdout + up.stderr).trim() });
+      const crashed = up.code === 0 ? await settleCheck(session, base, [service]) : [];
+      log.push({ title: 'Still running afterwards', ok: up.code === 0 && !crashed.length, output: crashed.length ? `${crashed[0].state}, exit ${crashed[0].exitCode}` : 'up' });
+      res.json({ ok: up.code === 0 && !crashed.length, log, crashed });
     }),
   );
 

@@ -208,6 +208,12 @@ async function onTar(e: Event, service: string) {
     } else {
       notify(`Loaded ${res.images.join(', ')}`);
       selected.value = new Set([...selected.value, service]);
+      // A new build of a service that already runs: switch it over now, same settings.
+      if (detail.value?.services.find((s) => s.name === service)?.state) {
+        upload.value = null;
+        await updateServices([service]);
+        return;
+      }
     }
     await load();
   } catch (err) {
@@ -215,6 +221,47 @@ async function onTar(e: Event, service: string) {
   } finally {
     stopWatch();
     upload.value = null;
+  }
+}
+
+/** Recreates services on the image just loaded — settings untouched, old build kept as :rollback. */
+async function updateServices(services: string[]) {
+  const log = reactive({ title: `Update ${services.join(', ')} to the new build`, steps: [] as StepResult[], running: true, error: '' });
+  opLog.value = log;
+  try {
+    const res = await api.stackUpdateImages(ref_.value, services);
+    log.steps = res.log;
+    crashed.value = res.crashed;
+    if (res.ok) {
+      opLog.value = null;
+      notify(`${services.join(', ')} updated — previous build kept as :rollback`);
+    } else log.error = 'Updated, but it is not staying up — see below. Roll back puts the previous build back.';
+    emit('changed');
+  } catch (err) {
+    log.steps = err instanceof ApiError ? ((err.payload.log as StepResult[]) ?? []) : [];
+    log.error = (err as Error).message;
+  } finally {
+    log.running = false;
+    await load();
+  }
+}
+
+async function rollback(service: string) {
+  if (!confirm(`Put ${service} back on the build it ran before its last update?`)) return;
+  const log = reactive({ title: `Roll back ${service}`, steps: [] as StepResult[], running: true, error: '' });
+  opLog.value = log;
+  try {
+    const res = await api.stackRollback(ref_.value, service);
+    log.steps = res.log;
+    crashed.value = res.crashed;
+    if (res.ok) notify(`${service} rolled back`);
+    emit('changed');
+  } catch (err) {
+    log.steps = err instanceof ApiError ? ((err.payload.log as StepResult[]) ?? []) : [];
+    log.error = (err as Error).message;
+  } finally {
+    log.running = false;
+    await load();
   }
 }
 
@@ -349,6 +396,17 @@ const ghost = 'rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate
                   <input type="file" accept=".tar,.gz,.tgz,.xz,.zst" class="hidden" :disabled="Boolean(upload)" @change="onTar($event, s.name)" />
                 </label>
               </template>
+              <label
+                v-if="s.imagePresent && s.state"
+                class="cursor-pointer rounded-md border border-slate-700 px-2 py-1 text-[11px] text-slate-300 hover:border-sky-500 hover:text-white"
+                title="Upload a new build of this image (.tar / .tar.gz): it is loaded and this service switches to it, same settings"
+              >
+                <v-icon name="fa-file-upload" scale="0.6" /> New build
+                <input type="file" accept=".tar,.gz,.tgz,.xz,.zst" class="hidden" :disabled="Boolean(upload)" @change="onTar($event, s.name)" />
+              </label>
+              <button v-if="s.state" class="rounded p-1 text-slate-500 hover:text-amber-300" title="Roll back to the build before the last update" @click="rollback(s.name)">
+                <v-icon name="fa-history" scale="0.7" />
+              </button>
               <button v-if="s.container" class="rounded p-1 text-slate-500 hover:text-white" title="Logs" @click="emit('openLogs', s.container)">
                 <v-icon name="fa-terminal" scale="0.7" />
               </button>
