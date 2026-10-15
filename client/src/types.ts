@@ -742,3 +742,81 @@ export interface PgBackRestBackupsResponse {
   archiveTimeout?: number;
   sizes?: { backupsBytes: number; walArchiveBytes: number } | null;
 }
+
+// ------------------------------------------------------- postgres: health & upkeep
+
+export interface PgOverview {
+  version: string;
+  port: number;
+  listen: string;
+  startedAt: string;
+  maxConnections: number;
+  connections: number;
+  active: number;
+  idleInTransaction: number;
+  longestSeconds: number;
+  cacheHitPct: number | null;
+  dataDirectory: string;
+  statStatements: { loaded: boolean; created: boolean; preload: string };
+}
+
+export interface PgIndex {
+  schema: string;
+  table: string;
+  index: string;
+  bytes: number;
+  method: string;
+  primary: boolean;
+  unique: boolean;
+  valid: boolean;
+  scans: number;
+  lastUsed: string | null;
+  definition: string;
+  lastVacuum: string | null;
+  lastAutovacuum: string | null;
+  lastAnalyze: string | null;
+  lastAutoanalyze: string | null;
+  deadRows: number | null;
+  liveRows: number | null;
+  tableBytes: number;
+  /** When the index file was written — its last REINDEX, or creation. ms since epoch. */
+  rebuiltAt: number | null;
+  /** pgstatindex(), btree only, when pgstattuple is installed in that database. */
+  frag?: { leaf_fragmentation: number; avg_leaf_density: number } | null;
+}
+
+export type PgMaintenance = 'reindex-index' | 'reindex-table' | 'vacuum' | 'vacuum-full';
+
+export interface PgSession {
+  pid: number;
+  database: string | null;
+  user: string | null;
+  application: string;
+  client: string | null;
+  kind: string;
+  state: string | null;
+  waitType: string | null;
+  wait: string | null;
+  queryStart: string | null;
+  transactionStart: string | null;
+  seconds: number | null;
+  query: string;
+}
+
+export interface PgTopQuery {
+  database: string | null;
+  user: string | null;
+  calls: number;
+  totalMs: number;
+  meanMs: number;
+  maxMs: number;
+  rows: number;
+  query: string;
+}
+
+export interface PgDump {
+  file: string;
+  database: string;
+  bytes: number;
+  createdAt: number;
+}

@@ -21,6 +21,7 @@ import { registerPgBackRest } from './pgbackrest.js';
 import { registerDbTransfer } from './dbtransfer.js';
 import { registerPostgres } from './postgres.js';
 import { registerPgTunnel } from './pgtunnel.js';
+import { registerPgTools } from './pgtools.js';
 import { registerPgHba } from './pghba.js';
 import { registerProcesses } from './processes.js';
 import { registerTerminal } from './terminal.js';
@@ -624,6 +625,7 @@ registerDotnet(app, requireSession as express.RequestHandler, asyncRoute, upload
 registerUsers(app, requireSession as express.RequestHandler, asyncRoute);
 registerPostgres(app, requireSession as express.RequestHandler, asyncRoute);
 registerPgTunnel(app, requireSession as express.RequestHandler, asyncRoute);
+registerPgTools(app, requireSession as express.RequestHandler, asyncRoute);
 registerPgHba(app, requireSession as express.RequestHandler, asyncRoute);
 registerDbTransfer(app, requireSession as express.RequestHandler, asyncRoute);
 registerPermissions(app, requireSession as express.RequestHandler, asyncRoute);

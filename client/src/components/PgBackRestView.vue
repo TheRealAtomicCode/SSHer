@@ -693,6 +693,11 @@ const card = 'rounded-xl border border-slate-800 bg-slate-900/40 p-4';
           <!-- Per-database size -->
           <section v-if="stats?.databases.length" class="space-y-2">
             <h2 class="text-sm font-semibold text-white">What's in the backups</h2>
+            <p class="text-xs text-slate-500">
+              These backups always hold <b>every</b> database — that is what lets you rewind the whole server to a moment in time.
+              To back up only the databases you choose, use
+              <b class="text-slate-300">PostgreSQL → Databases &amp; backups → Back up databases</b>.
+            </p>
             <div class="overflow-hidden rounded-xl border border-slate-800">
               <table class="w-full text-xs">
                 <thead class="bg-slate-900/60 text-slate-500">

@@ -102,9 +102,13 @@ import {
   FaDice,
   FaLayerGroup,
   FaSlidersH,
+  FaBroom,
+  FaTachometerAlt,
 } from 'oh-vue-icons/icons';
 
 addIcons(
+  FaBroom,
+  FaTachometerAlt,
   FaSlidersH,
   FaDice,
   FaLayerGroup,

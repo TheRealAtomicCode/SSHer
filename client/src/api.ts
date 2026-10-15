@@ -45,7 +45,13 @@ import type {
   PostgresTablePrivilege,
   PostgresTablePrivileges,
   PostgresTunnelState,
+  PgDump,
   PgHbaState,
+  PgIndex,
+  PgMaintenance,
+  PgOverview,
+  PgSession,
+  PgTopQuery,
   ProcessInfo,
   Session,
   Signal,
@@ -241,6 +247,70 @@ export function postgresDumpUrl(opts: { db?: string; format: 'custom' | 'sql' })
   else params.set('all', '1');
   if (accessKey) params.set('key', accessKey);
   return `/api/postgres/dump?${params.toString()}`;
+}
+
+/** A saved per-database backup, as a plain download link. */
+export function postgresSavedDumpUrl(file: string): string {
+  const params = new URLSearchParams({ sid: sessionId ?? '', file });
+  if (accessKey) params.set('key', accessKey);
+  return `/api/postgres/dumps/download?${params.toString()}`;
+}
+
+export function postgresOverview(): Promise<PgOverview> {
+  return request('/postgres/overview');
+}
+
+export function postgresIndexes(db: string): Promise<{ pgstattuple: boolean; indexes: PgIndex[] }> {
+  return request(`/postgres/indexes?db=${encodeURIComponent(db)}`);
+}
+
+export function postgresEnableIndexStats(db: string): Promise<void> {
+  return request('/postgres/indexes/enable-stats', { method: 'POST', body: json({ db }) });
+}
+
+export function postgresMaintenance(spec: { db: string; action: PgMaintenance; schema: string; name: string }): Promise<{ seconds: number; output: string }> {
+  return request('/postgres/maintenance', { method: 'POST', body: json(spec) });
+}
+
+export function postgresActivity(): Promise<{ sessions: PgSession[] }> {
+  return request('/postgres/activity');
+}
+
+export function postgresStopSession(pid: number, terminate: boolean): Promise<{ ok: boolean }> {
+  return request('/postgres/activity/stop', { method: 'POST', body: json({ pid, terminate }) });
+}
+
+export function postgresTopQueries(by: 'total' | 'mean' | 'calls'): Promise<{
+  loaded: boolean;
+  created: boolean;
+  queries: PgTopQuery[];
+  since?: string | null;
+}> {
+  return request(`/postgres/top-queries?by=${by}`);
+}
+
+export function postgresEnableTopQueries(): Promise<{ restarted: boolean }> {
+  return request('/postgres/top-queries/enable', { method: 'POST' });
+}
+
+export function postgresResetTopQueries(): Promise<void> {
+  return request('/postgres/top-queries/reset', { method: 'POST' });
+}
+
+export function postgresDumps(): Promise<{ dumps: PgDump[]; dir: string }> {
+  return request('/postgres/dumps');
+}
+
+export function postgresBackupDatabases(databases: string[]): Promise<{ ok: boolean; results: { database: string; ok: boolean; output: string }[] }> {
+  return request('/postgres/dumps', { method: 'POST', body: json({ databases }) });
+}
+
+export function postgresDeleteDump(file: string): Promise<void> {
+  return request('/postgres/dumps/delete', { method: 'POST', body: json({ file }) });
+}
+
+export function postgresRestoreDump(file: string, target: string, owner: string): Promise<{ output: string }> {
+  return request('/postgres/dumps/restore', { method: 'POST', body: json({ file, target, owner }) });
 }
 
 /** Direct URL for <img> and download links, which cannot send custom headers. */

@@ -22,9 +22,67 @@ import type {
   View,
 } from '../types';
 import StepLog from './StepLog.vue';
+import PgDatabaseBackups from './PgDatabaseBackups.vue';
+import PgOverview from './PgOverview.vue';
+import PgPerformance from './PgPerformance.vue';
 
 /** `navigate` opens the Transfer page (next to "New role"). */
 const emit = defineEmits<{ navigate: [View] }>();
+
+/** The page's sections, one at a time — each used to be stacked on one long page. */
+const SECTIONS = [
+  { id: 'overview', label: 'Overview', icon: 'fa-tachometer-alt' },
+  { id: 'databases', label: 'Databases & backups', icon: 'fa-database' },
+  { id: 'users', label: 'Users & access', icon: 'fa-users' },
+  { id: 'connections', label: 'Connections', icon: 'fa-plug' },
+  { id: 'performance', label: 'Performance', icon: 'fa-chart-line' },
+] as const;
+type Section = (typeof SECTIONS)[number]['id'];
+const SECTION_KEY = 'ssh-fb.postgres-section';
+const section = ref<Section>(
+  (() => {
+    try {
+      const saved = localStorage.getItem(SECTION_KEY);
+      return SECTIONS.some((s) => s.id === saved) ? (saved as Section) : 'overview';
+    } catch {
+      return 'overview';
+    }
+  })(),
+);
+watch(
+  section,
+  (s) => {
+    try {
+      localStorage.setItem(SECTION_KEY, s);
+    } catch {
+      // private window — the default section is fine
+    }
+    if (s === 'connections') {
+      hbaOpen.value = true;
+      if (!hba.value) loadHba();
+    }
+  },
+  { immediate: false },
+);
+
+/** Which tables' privilege rows are expanded in "Database access". */
+const openTables = ref<Set<string>>(new Set());
+function toggleTable(name: string) {
+  const next = new Set(openTables.value);
+  if (next.has(name)) next.delete(name);
+  else next.add(name);
+  openTables.value = next;
+}
+/** A table's grants in words, for the collapsed row. */
+function grantSummary(t: PostgresTablePrivileges): string {
+  const has = (p: string) => t[p.toLowerCase() as TableKey];
+  const read = has('SELECT');
+  const write = ['INSERT', 'UPDATE', 'DELETE'].filter(has);
+  if (!read && !write.length && !TABLE_PRIVS.some(has)) return 'no access';
+  const parts = [read ? 'read' : '', write.length === 3 ? 'write' : write.map((w) => w.toLowerCase()).join(', ')].filter(Boolean);
+  const extra = (['TRUNCATE', 'REFERENCES', 'TRIGGER'] as const).filter(has).map((p) => p.toLowerCase());
+  return [...parts, ...extra].join(' · ');
+}
 
 const ROLE_ATTRS = ['canlogin', 'superuser', 'createdb', 'createrole', 'replication', 'bypassrls'] as const;
 const ROLE_ATTR_LABEL: Record<(typeof ROLE_ATTRS)[number], string> = {
@@ -37,8 +95,15 @@ const ROLE_ATTR_LABEL: Record<(typeof ROLE_ATTRS)[number], string> = {
 };
 
 const TABLE_PRIVS = ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER'] as const;
-const TABLE_PRIV_ABBR: Record<(typeof TABLE_PRIVS)[number], string> = {
-  SELECT: 'Se', INSERT: 'In', UPDATE: 'Up', DELETE: 'De', TRUNCATE: 'Tn', REFERENCES: 'Rf', TRIGGER: 'Tg',
+/** What each table privilege lets the role do, in words. */
+const TABLE_PRIV_LABEL: Record<(typeof TABLE_PRIVS)[number], { title: string; hint: string }> = {
+  SELECT: { title: 'Read', hint: 'SELECT — read rows' },
+  INSERT: { title: 'Add', hint: 'INSERT — add rows' },
+  UPDATE: { title: 'Change', hint: 'UPDATE — change rows' },
+  DELETE: { title: 'Delete', hint: 'DELETE — delete rows' },
+  TRUNCATE: { title: 'Empty', hint: 'TRUNCATE — empty the whole table at once' },
+  REFERENCES: { title: 'Reference', hint: 'REFERENCES — point a foreign key at it' },
+  TRIGGER: { title: 'Triggers', hint: 'TRIGGER — create triggers on it' },
 };
 type TableKey = 'select' | 'insert' | 'update' | 'delete' | 'truncate' | 'references' | 'trigger';
 
@@ -696,6 +761,10 @@ async function changeOwner(table: PostgresTablePrivileges, newOwner: string) {
 onMounted(() => {
   refresh();
   loadTunnel();
+  if (section.value === 'connections') {
+    hbaOpen.value = true;
+    loadHba();
+  }
 });
 
 const btn = 'rounded-lg border border-slate-700 px-2.5 py-1.5 text-xs text-slate-300 transition hover:border-emerald-500 disabled:cursor-not-allowed disabled:opacity-40';
@@ -743,6 +812,17 @@ const label = 'mb-1.5 block text-xs font-medium text-slate-400';
         </button>
       </div>
 
+      <nav v-if="usable" class="flex gap-1 overflow-x-auto border-b border-slate-800 px-5 pt-2">
+        <button
+          v-for="s in SECTIONS"
+          :key="s.id"
+          class="flex shrink-0 items-center gap-1.5 rounded-t-md border-b-2 px-3 py-2 text-xs transition"
+          :class="section === s.id ? 'border-sky-400 text-white' : 'border-transparent text-slate-500 hover:text-slate-300'"
+          @click="section = s.id"
+        >
+          <v-icon :name="s.icon" scale="0.7" /> {{ s.label }}
+        </button>
+      </nav>
 
       <div class="min-h-0 flex-1 overflow-auto p-5">
         <div v-if="loading && !context" class="py-16 text-center">
@@ -772,7 +852,10 @@ const label = 'mb-1.5 block text-xs font-medium text-slate-400';
         </div>
 
         <template v-else>
-        <div v-if="tunnel" class="mb-4 rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+        <PgOverview v-if="section === 'overview'" @go="section = $event" />
+        <PgPerformance v-if="section === 'performance'" :databases="databases" />
+
+        <div v-if="tunnel && section === 'connections'" class="mx-auto mb-4 max-w-5xl rounded-xl border border-slate-800 bg-slate-900/60 p-4">
           <div class="flex flex-wrap items-center gap-3">
             <v-icon name="fa-plug" scale="0.9" :class="tunnel.tunnel ? 'text-emerald-400' : 'text-slate-500'" />
             <div class="min-w-0 flex-1">
@@ -851,7 +934,7 @@ const label = 'mb-1.5 block text-xs font-medium text-slate-400';
           </div>
         </div>
 
-        <div class="mb-4 rounded-xl border border-slate-800 bg-slate-900/60">
+        <div v-if="section === 'connections'" class="mx-auto mb-4 max-w-5xl rounded-xl border border-slate-800 bg-slate-900/60">
           <button class="flex w-full items-center gap-3 p-4 text-left" @click="toggleHba">
             <v-icon name="fa-shield-alt" scale="0.9" class="text-sky-300" />
             <div class="min-w-0 flex-1">
@@ -998,71 +1081,80 @@ const label = 'mb-1.5 block text-xs font-medium text-slate-400';
           </div>
         </div>
 
-        <div class="overflow-hidden rounded-xl border border-slate-800">
-          <div v-if="databases.length" class="border-b border-slate-800 bg-slate-900/60 px-4 py-3">
-            <p class="mb-2 flex items-center gap-2 text-xs text-slate-400">
-              <v-icon name="fa-database" scale="0.7" class="text-sky-300" /> Databases
-              <span class="text-slate-600">· {{ formatSize(databases.reduce((n, d) => n + (d.bytes ?? 0), 0)) }} in total</span>
-              <span class="ml-auto flex items-center gap-2">
-                <select
-                  v-model="dumpFormat"
-                  class="rounded-md border border-slate-700 bg-slate-950 px-1.5 py-0.5 text-[11px] text-slate-300"
-                  title="Format of a single-database download"
-                >
+        <!-- Databases & backups -->
+        <div v-if="section === 'databases'" class="mx-auto max-w-5xl space-y-5">
+          <section class="overflow-hidden rounded-xl border border-slate-800">
+            <div class="flex flex-wrap items-center gap-2 border-b border-slate-800 bg-slate-900/60 px-4 py-3">
+              <v-icon name="fa-database" scale="0.8" class="text-sky-300" />
+              <p class="text-sm font-medium text-white">Databases</p>
+              <span class="text-xs text-slate-500">{{ databases.length }} · {{ formatSize(databases.reduce((n, d) => n + (d.bytes ?? 0), 0)) }} in total</span>
+              <div class="flex-1" />
+              <label class="flex items-center gap-1.5 text-[11px] text-slate-400">
+                Download as
+                <select v-model="dumpFormat" class="rounded-md border border-slate-700 bg-slate-950 px-1.5 py-0.5 text-[11px] text-slate-300">
                   <option value="custom">.dump (pg_restore)</option>
                   <option value="sql">.sql.gz (psql)</option>
                 </select>
-                <button
-                  class="flex items-center gap-1 rounded-md border border-slate-700 px-2 py-0.5 text-[11px] text-slate-300 hover:bg-slate-800 hover:text-white"
-                  title="Every database plus roles and passwords, as one gzipped SQL file (pg_dumpall)"
-                  @click="downloadDump()"
-                >
-                  <v-icon name="fa-download" scale="0.6" /> Download all
-                </button>
-              </span>
-            </p>
-            <div class="flex flex-wrap gap-1.5">
-              <span
-                v-for="d in [...databases].sort((a, b) => (b.bytes ?? 0) - (a.bytes ?? 0))"
-                :key="d.name"
-                class="flex items-stretch overflow-hidden rounded-md bg-slate-800 text-[11px]"
+              </label>
+              <button
+                class="flex items-center gap-1 rounded-md border border-slate-700 px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-800 hover:text-white"
+                title="Every database plus roles and passwords, as one gzipped SQL file (pg_dumpall)"
+                @click="downloadDump()"
               >
-                <button
-                  class="px-2 py-1 transition hover:bg-slate-700"
-                  :title="`Owner: ${d.owner} — click to change the owner or drop it`"
-                  @click="openDatabase(d)"
-                >
-                  <span class="font-mono text-slate-200">{{ d.name }}</span>
-                  <span class="ml-1.5 text-slate-500">{{ d.owner }}</span>
-                  <span class="ml-1.5 text-sky-300">{{ formatSize(d.bytes ?? 0) }}</span>
+                <v-icon name="fa-download" scale="0.6" /> Download everything
+              </button>
+            </div>
+            <div class="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_6rem_auto] gap-3 border-b border-slate-800 bg-slate-950/40 px-4 py-1.5 text-[11px] text-slate-500">
+              <span>Name</span><span>Owner</span><span class="text-right">Size</span><span />
+            </div>
+            <div
+              v-for="d in [...databases].sort((a, b) => (b.bytes ?? 0) - (a.bytes ?? 0))"
+              :key="d.name"
+              class="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_6rem_auto] items-center gap-3 border-b border-slate-800/60 px-4 py-2 text-xs last:border-b-0 hover:bg-slate-900/50"
+            >
+              <span class="truncate font-mono text-slate-200">{{ d.name }}</span>
+              <span class="truncate font-mono text-slate-400">{{ d.owner }}</span>
+              <span class="text-right text-sky-300">{{ formatSize(d.bytes ?? 0) }}</span>
+              <span class="flex gap-1">
+                <button class="rounded-md px-2 py-1 text-slate-300 hover:bg-slate-800" :title="`Download ${d.name} now`" @click="downloadDump(d.name)">
+                  <v-icon name="fa-download" scale="0.6" /> Download
                 </button>
-                <button
-                  class="border-l border-slate-700 px-1.5 text-slate-400 transition hover:bg-sky-500/15 hover:text-sky-300"
-                  :title="`Download ${d.name} as ${dumpFormat === 'custom' ? '.dump — restore with pg_restore' : '.sql.gz — restore with psql'}`"
-                  @click="downloadDump(d.name)"
-                >
-                  <v-icon name="fa-download" scale="0.6" />
+                <button class="rounded-md px-2 py-1 text-slate-300 hover:bg-slate-800" title="Change the owner, or drop it" @click="openDatabase(d)">
+                  <v-icon name="fa-cog" scale="0.6" /> Manage
                 </button>
               </span>
             </div>
-          </div>
-          <div
-            v-for="role in roles"
-            :key="role.name"
-            class="border-b border-slate-800/70 bg-slate-950/40 last:border-b-0 hover:bg-slate-900/60"
-          >
-            <button class="flex w-full items-center gap-3 px-4 py-3 text-left" :class="selected?.name === role.name && 'bg-sky-500/5'" @click="select(role)">
-              <v-icon name="fa-user" scale="0.9" class="text-sky-300" />
-              <div class="min-w-0 flex-1">
-                <p class="flex flex-wrap items-center gap-2 text-sm font-medium text-white">
-                  {{ role.name }}
-                  <span v-if="role.superuser" class="rounded bg-red-900/50 px-1.5 py-0.5 text-[10px] text-red-300">superuser</span>
-                  <span v-if="!role.canlogin" class="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] text-slate-400">no login</span>
-                  <span v-if="role.createdb" class="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] text-slate-400">createdb</span>
-                </p>
-                <p class="truncate text-xs text-slate-500">{{ role.memberof.join(', ') || '—' }}</p>
-              </div>
-            </button>
+          </section>
+
+          <PgDatabaseBackups :databases="databases" :roles="roles" @changed="refresh" />
+        </div>
+
+        <!-- Users & access -->
+        <div v-if="section === 'users'" class="mx-auto max-w-5xl">
+          <p class="mb-2 text-xs text-slate-500">Click a user to change its password and rights, or what it may do in each database.</p>
+          <div class="overflow-hidden rounded-xl border border-slate-800">
+            <div
+              v-for="role in roles"
+              :key="role.name"
+              class="border-b border-slate-800/70 bg-slate-950/40 last:border-b-0 hover:bg-slate-900/60"
+            >
+              <button class="flex w-full items-center gap-3 px-4 py-3 text-left" :class="selected?.name === role.name && 'bg-sky-500/5'" @click="select(role)">
+                <v-icon name="fa-user" scale="0.9" class="text-sky-300" />
+                <div class="min-w-0 flex-1">
+                  <p class="flex flex-wrap items-center gap-2 text-sm font-medium text-white">
+                    {{ role.name }}
+                    <span v-if="role.superuser" class="rounded bg-red-900/50 px-1.5 py-0.5 text-[10px] text-red-300">superuser</span>
+                    <span v-if="!role.canlogin" class="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] text-slate-400">no login</span>
+                    <span v-if="role.createdb" class="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] text-slate-400">can create databases</span>
+                  </p>
+                  <p class="truncate text-xs text-slate-500">
+                    {{ databases.filter((d) => d.owner === role.name).map((d) => d.name).join(', ') ? `owns ${databases.filter((d) => d.owner === role.name).map((d) => d.name).join(', ')}` : '' }}
+                    {{ role.memberof.length ? ` · member of ${role.memberof.join(', ')}` : '' }}
+                  </p>
+                </div>
+                <v-icon name="fa-chevron-right" scale="0.6" class="text-slate-600" />
+              </button>
+            </div>
           </div>
         </div>
         </template>
@@ -1070,7 +1162,7 @@ const label = 'mb-1.5 block text-xs font-medium text-slate-400';
     </div>
 
     <!-- Detail drawer -->
-    <aside v-if="selected" class="flex w-[28rem] max-w-[50vw] shrink-0 flex-col border-l border-slate-800 bg-slate-900">
+    <aside v-if="selected && section === 'users'" class="flex w-[32rem] max-w-[55vw] shrink-0 flex-col border-l border-slate-800 bg-slate-900">
       <div class="flex items-center gap-2 border-b border-slate-800 px-4 py-3">
         <v-icon name="fa-user" scale="0.9" class="text-sky-300" />
         <p class="min-w-0 flex-1 truncate text-sm font-semibold text-white">{{ selected.name }}</p>
@@ -1153,42 +1245,53 @@ const label = 'mb-1.5 block text-xs font-medium text-slate-400';
               </div>
 
               <div v-if="accessLoading" class="py-6 text-center"><v-icon name="fa-spinner" class="animate-spin text-sky-400" /></div>
-              <div v-else-if="accessTables.length" class="overflow-x-auto">
-                <table class="w-full text-xs">
-                  <thead class="text-slate-500">
-                    <tr>
-                      <th class="py-1 text-left font-medium">Table</th>
-                      <th class="text-left font-medium">Owner</th>
-                      <th v-for="p in TABLE_PRIVS" :key="p" class="w-9 font-medium" :title="p">{{ TABLE_PRIV_ABBR[p] }}</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr v-for="table in accessTables" :key="table.name" class="border-t border-slate-800/70">
-                      <td class="py-1.5 font-mono text-slate-200">{{ table.name }}</td>
-                      <td class="py-1.5">
+              <div v-else-if="accessTables.length">
+                <div class="mb-1.5 flex items-center justify-between text-[11px] text-slate-500">
+                  <span>{{ accessTables.length }} tables — click one to change what this role may do</span>
+                  <button
+                    class="text-sky-400 hover:text-sky-300"
+                    @click="openTables = openTables.size ? new Set() : new Set(accessTables.map((t) => t.name))"
+                  >
+                    {{ openTables.size ? 'Collapse all' : 'Expand all' }}
+                  </button>
+                </div>
+                <div class="overflow-hidden rounded-lg border border-slate-800">
+                  <div v-for="table in accessTables" :key="table.name" class="border-b border-slate-800/70 last:border-b-0">
+                    <button class="flex w-full items-center gap-2 px-3 py-2 text-left text-xs hover:bg-slate-800/40" @click="toggleTable(table.name)">
+                      <v-icon :name="openTables.has(table.name) ? 'fa-angle-down' : 'fa-chevron-right'" scale="0.6" class="text-slate-500" />
+                      <span class="min-w-0 flex-1 truncate font-mono text-slate-200">{{ table.name }}</span>
+                      <span class="shrink-0 text-[11px]" :class="grantSummary(table) === 'no access' ? 'text-slate-600' : 'text-emerald-300'">{{ grantSummary(table) }}</span>
+                    </button>
+                    <div v-if="openTables.has(table.name)" class="space-y-2 bg-slate-950/50 px-3 pt-1 pb-3 text-xs">
+                      <div class="grid grid-cols-2 gap-x-3 gap-y-1">
+                        <label v-for="p in TABLE_PRIVS" :key="p" class="flex items-start gap-2 text-slate-300" :title="TABLE_PRIV_LABEL[p].hint">
+                          <input
+                            type="checkbox"
+                            class="mt-0.5 accent-sky-500"
+                            :checked="table[p.toLowerCase() as TableKey]"
+                            @change="toggleTablePrivilege(table, p)"
+                          />
+                          <span>
+                            {{ TABLE_PRIV_LABEL[p].title }}
+                            <span class="block text-[10px] text-slate-500">{{ TABLE_PRIV_LABEL[p].hint }}</span>
+                          </span>
+                        </label>
+                      </div>
+                      <label class="flex items-center gap-2 border-t border-slate-800 pt-2 text-slate-400">
+                        Owner
                         <select
                           :value="table.owner"
                           :disabled="ownerBusy === table.name"
-                          class="rounded border border-slate-800 bg-slate-950 px-1 py-0.5 font-mono text-[11px] text-slate-300 focus:border-sky-500 focus:outline-none"
+                          class="rounded border border-slate-700 bg-slate-950 px-1.5 py-0.5 font-mono text-[11px] text-slate-300 focus:border-sky-500 focus:outline-none"
                           @change="changeOwner(table, ($event.target as HTMLSelectElement).value)"
                         >
                           <option v-for="r in roles" :key="r.name" :value="r.name">{{ r.name }}</option>
                         </select>
-                      </td>
-                      <td v-for="p in TABLE_PRIVS" :key="p" class="text-center">
-                        <input
-                          type="checkbox"
-                          class="accent-sky-500"
-                          :checked="table[p.toLowerCase() as TableKey]"
-                          @change="toggleTablePrivilege(table, p)"
-                        />
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
-                <p class="mt-2 text-[11px] text-slate-500">
-                  Owner controls ALTER/DROP — Postgres has no grantable privilege for those, only ownership.
-                </p>
+                        <span class="text-[10px] text-slate-500">the owner may also change (ALTER) and remove (DROP) it</span>
+                      </label>
+                    </div>
+                  </div>
+                </div>
               </div>
               <p v-else class="py-6 text-center text-slate-500">No tables in this schema.</p>
             </template>

@@ -43,13 +43,13 @@ const ROLE_ATTRIBUTES: Record<string, string> = {
 /** Double-quoted SQL identifier — the only values ever interpolated this way are
  *  names the server itself already validated against `PG_IDENT_RE`, or ones a
  *  prior query of this server's own returned. */
-function pgIdent(name: string): string {
+export function pgIdent(name: string): string {
   return `"${name.replace(/"/g, '""')}"`;
 }
 
 /** Single-quoted SQL string literal (doubled `'`) — used for the one piece of
  *  genuinely free-text input here, a new password. */
-function pgLiteral(value: string): string {
+export function pgLiteral(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
 }
 
@@ -169,7 +169,7 @@ const DUMP_FAILED = '__SSHER_DUMP_FAILED__';
  *  out only with the first byte of the dump, so a failure before that (no sudo, a
  *  bad name) is still a normal JSON error; a failure mid-way aborts the response,
  *  which the browser shows as a failed download rather than a quietly cut-off file. */
-async function streamDump(session: SshSession, inner: string, filename: string, res: Response): Promise<void> {
+export async function streamDump(session: SshSession, inner: string, filename: string, res: Response): Promise<void> {
   const asPostgres = session.username === 'postgres' ? '' : `${sudoPrefix(session, '-H -u postgres')} `;
   const command = `${asPostgres}sh -c ${shellQuote(inner)}`;
   const channel = await execChannel(session, command);
